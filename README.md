@@ -80,12 +80,21 @@ Full English section below ↓ · [Download the Windows build](https://github.co
 
 ### 快速开始
 
+**方式一：直接下载（普通用户）**
+
+到 [Releases](https://github.com/Talon-Yuan/galvo-calib-vision/releases/latest) 下载
+`GalvoCalibVision_v4.0_windows_x64.zip` → 解压 → 双击 `GalvoCalibVision.exe`（免安装，整个目录可拷贝）
+
+**方式二：源码运行（开发者）**
+
 ```bash
-git clone https://github.com/<your-name>/galvo-calib-vision.git
+git clone https://github.com/Talon-Yuan/galvo-calib-vision.git
 cd galvo-calib-vision
 pip install -r requirements.txt
 python app.py
 ```
+
+环境要求：Windows 10/11 x64 + Python 3.10+（PyQt5 桌面端）；`core/` 算法层可脱离界面单独调用。
 
 四步流程：**① 标定棋盘格 → ② 导入相纸扫描图 → ③ 定义阵列与建系 → ④ 检测与导出**
 
@@ -186,12 +195,21 @@ Acceptance: **composite RMS ≤ 0.15 mm, Max ≤ 0.40 mm**; calibration pass lin
 
 ### Quick start
 
+**Option A — download (most users)**
+
+Grab `GalvoCalibVision_v4.0_windows_x64.zip` from [Releases](https://github.com/Talon-Yuan/galvo-calib-vision/releases/latest),
+unzip it, and run `GalvoCalibVision.exe`. No installer; the folder is portable.
+
+**Option B — run from source**
+
 ```bash
-git clone https://github.com/<your-name>/galvo-calib-vision.git
+git clone https://github.com/Talon-Yuan/galvo-calib-vision.git
 cd galvo-calib-vision
 pip install -r requirements.txt
 python app.py
 ```
+
+Requires Windows 10/11 x64 + Python 3.10+ (PyQt5 desktop app); the `core/` layer works standalone.
 
 Workflow: **① calibrate chessboard → ② import scanned sheet → ③ define array & frame → ④ detect & export**
 
