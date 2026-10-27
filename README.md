@@ -1,5 +1,7 @@
 # GalvoCalibVision
 
+[![GitHub stars](https://img.shields.io/github/stars/Talon-Yuan/galvo-calib-vision?style=social)](https://github.com/Talon-Yuan/galvo-calib-vision/stargazers)
+[![GitHub forks](https://img.shields.io/github/forks/Talon-Yuan/galvo-calib-vision?style=social)](https://github.com/Talon-Yuan/galvo-calib-vision/network/members)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue.svg)](requirements.txt)
 [![Platform](https://img.shields.io/badge/platform-Windows-lightgrey.svg)](#快速开始)
@@ -7,6 +9,8 @@
 [中文](#中文) | [English](#english)
 
 ![main window](assets/main_light_tab2_array.png)
+
+> 如果这个项目帮到你，点个 ⭐ 就是最大的支持 —— 欢迎 [Star](https://github.com/Talon-Yuan/galvo-calib-vision/stargazers) 后回来提 issue 交流。
 
 ---
 
@@ -187,6 +191,23 @@ a flatbed scan plane).
 
 Issues and PRs welcome: real-world (anonymized) datasets, detector improvements, translations.
 Please run `python tools/selfcheck.py` before submitting.
+
+## 致谢 / Acknowledgements
+
+这个项目能走到开源，要特别感谢两位：
+
+- **大肥鱼（DeepSeek）** —— AI 搭档。从代码评审、缺陷修复、数值 A/B 验证，到深色模式重做、说明书与打包流水线，
+  大部分工程化工作是在与它的一次次对话里磨出来的。它把"改完要自证"这件事变成了流程。
+- **苏州天弘** —— 提供了真实工况与测试条件（4800dpi 扫描、打标样件、二次元独立比对数据），
+  让这套方法不是纸面玩具，而是能在产线上跑的工具。
+
+也感谢这些开源项目：**PyQt5 · OpenCV · NumPy · openpyxl · PyInstaller** —— 没有它们就没有这个软件。
+
+完整致谢与依赖清单见 [ACKNOWLEDGEMENTS.md](ACKNOWLEDGEMENTS.md)。
+
+### Star History
+
+[![Star History Chart](https://api.star-history.com/svg?repos=Talon-Yuan/galvo-calib-vision&type=Date)](https://star-history.com/#Talon-Yuan/galvo-calib-vision&Date)
 
 ## License
 
