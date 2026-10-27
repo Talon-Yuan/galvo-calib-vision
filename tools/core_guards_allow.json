@@ -1,0 +1,17 @@
+{
+  "_note": "guard-only patches; value-invariant (tools/core_ab.py A/B identical)",
+  "files": {
+    "core/calibrator.py": {
+      "sha256": "4f45ae02add71e7880b52098844d007d98f9a0773daaa34706444427d4d1c9a9",
+      "reason": "C01/C02/C03/C04 guards"
+    },
+    "core/image_loader.py": {
+      "sha256": "95efb9520e8d0f1b85e0466a2b3499ae05bf82b45d9906e088eea6f248ef47fb",
+      "reason": "C01/C02/C03/C04 guards"
+    },
+    "core/multi_pose_fit.py": {
+      "sha256": "2848c3fa6bed5cd234410f830718d9ae8475a6b00f0ac2605a933eecda8b598f",
+      "reason": "C01/C02/C03/C04 guards"
+    }
+  }
+}

@@ -1,0 +1,17 @@
+__pycache__/
+*.py[cod]
+logs/
+shots/
+dist/
+build/
+_dist/
+_build/
+*.spec.bak
+*.npz
+*.xlsx
+*.xls
+*.csv
+*.log
+.venv/
+venv/
+.env
