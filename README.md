@@ -14,6 +14,30 @@
 
 ---
 
+## TL;DR (English)
+
+**Turn a 4800-dpi flatbed scanner into a vision measuring machine for galvo marking arrays.**
+Scan a printed target, locate cross centers to sub-pixel accuracy, compare against the nominal grid,
+export an Excel report — as an engineering replacement for a six-figure 2D vision measuring machine.
+
+- **Accuracy on real data:** RMS 0.0785 mm / Max 0.2232 mm (5×5 array, 30 mm pitch, 4800 dpi)
+- **Huge scans:** tiled decoding, tested at 2.23 Gpx without OOM
+- **Honest framing:** 3-DOF only (rotation + translation). Shear/scaling fitting is *refused* on purpose,
+  so residuals cannot be made to look better than the machine really is
+- **Verification built in:** `tools/selfcheck.py`, `tools/core_ab.py` (numeric A/B fingerprints),
+  `tools/core_guard_tests.py` — every algorithm change can be proven value-invariant
+- **UI:** PyQt5, dark/light themes, Chinese/English, built-in manual (F1)
+
+```bash
+pip install -r requirements.txt
+python app.py
+```
+
+Workflow: ① calibrate chessboard → ② import scanned sheet → ③ define array & frame → ④ detect & export.
+Full English section below ↓ · [Download the Windows build](https://github.com/Talon-Yuan/galvo-calib-vision/releases/latest)
+
+---
+
 ## 中文
 
 ### 一句话
