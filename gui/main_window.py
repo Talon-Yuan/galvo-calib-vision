@@ -3011,6 +3011,9 @@ class MainWindow(QMainWindow):
                 return
         except Exception:
             pass
+        # v4.2.3（P2-②）：新检测开始时复位"放弃等待"标记（线程可能在
+        # isRunning() 与 finished.connect() 之间恰好结束的微窗口）
+        self._detect_abandoned = False
         # B1：检测前统一兜底正交化（覆盖自动建系/网格自校正等所有建系路径）。
         # _apply_ortho 幂等：已正交时修正量为 0，不会累积，也不会改动 origin/pitch。
         self._apply_ortho(self.grid, tr("main.pre_detection_fallback"))
@@ -3089,6 +3092,9 @@ class MainWindow(QMainWindow):
             self.btn_manual.setEnabled(self.calibrated)
             if getattr(self, "results", None) and any(r is not None for r in self.results):
                 self.btn_save_measure.setEnabled(True)
+            _probe = getattr(self, "_center_probe", None)
+            if _probe is None or not _probe.isRunning():
+                self.btn_pick_next.setEnabled(True)
             self._update_pick_ui()
         except Exception:
             pass
@@ -3155,6 +3161,11 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
             self._detect_abandoned = True
+            try:
+                if not th.isRunning():
+                    self._on_detect_thread_finished()
+            except Exception:
+                pass
             self._detect_thread = th
             self._on_detect_timeout_ui()
             return
