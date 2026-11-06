@@ -106,7 +106,7 @@ CATALOG: Dict[str, Tuple[str, str]] = {
     'calib.calibration_saved_path': ('标定参数已保存：{path}', 'Calibration saved: {path}'),
     'common.save_failed': ('保存失败', 'Save Failed'),
     'main.galvo_calibration_vision_software': ('振镜校准视觉定位软件 GalvoCalibVision', 'Galvo Calibration Vision Software'),
-    'main.app_startup_version': ('软件启动 v4.2（辅助建系+NG/轴语义+审计修复）', 'App started v4.2 (assisted framing + NG/axis + audit fixes)'),
+    'main.app_startup_version': ('软件启动 v4.2.1（辅助建系+NG/轴语义+终审修复）', 'App started v4.2.1 (assisted framing + NG/axis + final-audit fixes)'),
     'main.main_toolbar': ('主工具栏', 'Main Toolbar'),
     'main.import_scan': ('导入扫描图', 'Import Scan'),
     'main.save_project': ('保存工程', 'Save Project'),
@@ -602,6 +602,7 @@ CATALOG: Dict[str, Tuple[str, str]] = {
     'main.project_pitch_mismatch': ('工程 pitch 与网格不一致（网格 {a} / 工程 {b}），以网格为准', 'Project pitch mismatch (grid {a} / project {b}); grid wins'),
     'main.project_ortho_rejected_on_load': ('工程中的正交化被护栏拒绝（夹角偏差过大），已按原始方向加载', 'Stored orthogonalization rejected by guard (axis angle deviation too large); loaded as-is'),
     'main.cross_detection_timed_out_ui_forcibly_restored': ('十字检测超时未完成，已终止该线程并恢复界面', 'Cross detection timed out; worker terminated and UI restored'),
+    'main.detection_timed_out_background_still_decoding': ('检测超时：后台仍在解码原图，完成后可重试（不会重复占用）', 'Detection timed out: background decode still running; retry after it finishes'),
     'main.picked_n_of_3': ('已选 {n}/3', 'Picked {n}/3'),
     'main.undo_last_point_hint': ('已删除上一个点，可继续删除或点选下一个点', 'Last point deleted; delete more or pick next'),
 }

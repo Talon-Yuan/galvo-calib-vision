@@ -90,10 +90,11 @@ def _row_metrics(i: int, r: CrossResult, nominal: List[Tuple[float, float]],
     if res_fb is not None:
         dx_fb, dy_fb = res_fb.apply(mm_x, mm_y)
         mm_x, mm_y = mm_x + dx_fb, mm_y + dy_fb
+    # v4.2.1（P1-3）：判定链——减去判定原点（绝对偏差），物理 Y 向上为正。
+    # 不再做"中心归零 + to_phys 投影"，保证 CSV/标注与界面表格、Excel 完全同源。
     if center:
         mm_x, mm_y = mm_x - center[0], mm_y - center[1]
-    if grid is not None:
-        mm_x, mm_y = grid.to_phys(mm_x, mm_y)
+    mm_y = -mm_y
     if tx is not None:
         dx, dy = mm_x - tx, mm_y - ty
         dev = math.hypot(dx, dy)

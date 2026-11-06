@@ -3028,15 +3028,7 @@ class MainWindow(QMainWindow):
                                              parent=self, ref_angle_deg=self._grid_ref_angle_deg())
         self._detect_thread._gen = getattr(self, "_src_gen", 0)   # G06: 代次
         self._detect_thread.setPriority(QThread.LowPriority)  # 让出调度优先级，保障界面响应
-        def _on_detect_progress(v):
-            self.progress.setValue(int(v * 100))
-            # V41-03：有进度说明线程在动，按活跃续期（初始 30s 覆盖首次解码）
-            try:
-                if getattr(self, "_detect_guard", None) is not None:
-                    self._detect_guard.start(15000)
-            except Exception:
-                pass
-        self._detect_thread.progress.connect(_on_detect_progress)
+        self._detect_thread.progress.connect(self._on_detect_progress)
         self._detect_thread.done.connect(self._on_detect_done)
         self._detect_thread.error.connect(self._on_detect_error)
         # 8s 看门狗：极端场景（线程卡死不发任何信号）下强制恢复 UI，避免永久"重新检测中…"
@@ -3045,12 +3037,12 @@ class MainWindow(QMainWindow):
         self._detect_guard.timeout.connect(self._on_detect_timeout)
         # v4.1：首次检测需要解码原始灰度（2.23Gpx 图可达数十秒），8s 必误杀。
         # 已预热（之前解码过）仍用 8s 兜底；未预热给 30s。
-        # CORE-01：预热后按点数放大兜底时间（每点约 0.4s，至少 8s）；
-        # 未预热给 30s 覆盖首次 2.23Gpx 解码；进度信号会再续期 15s。
+        # v4.2.1（P0-1）：预热后按点数放大（0.4s/点，≥8s）；未预热给 60s 覆盖
+        # 2.23Gpx 首次冷解码（实测约 25–35s，留足余量）；进度只在解码后续期 20s。
         if getattr(self, "_gray_warm", False):
             _guard_ms = max(8000, 1500 + 400 * max(1, len(pts)))
         else:
-            _guard_ms = 30000
+            _guard_ms = 60000
         self._detect_guard.start(_guard_ms)
         _round = int(getattr(self, "_auto_correct_count", 0))
         _suffix = tr("main.detect_auto_round_suffix", n=_round) if _round > 0 else ""
@@ -3071,6 +3063,38 @@ class MainWindow(QMainWindow):
         self._log(tr("main.zh_44fe6b61", err=brief))
         QMessageBox.critical(self, tr("main.detection_failed"), tr("main.exception_in_cross_detection_thread_ui_restored_err_", err=brief))
 
+    def _on_detect_thread_finished(self):
+        """被放弃等待的检测线程跑完后恢复入口（P0-2 配套）。"""
+        try:
+            self._detect_thread = None
+            self.btn_detect.setEnabled(self.calibrated)
+            self.progress.setValue(0)
+        except Exception:
+            pass
+
+    def _on_detect_progress(self, v):
+        """检测进度：显示 + 续期看门狗（只有解码后的真实进度才续期，P0-1）。"""
+        try:
+            self.progress.setValue(int((v or 0.0) * 100))
+        except Exception:
+            pass
+        # 解码心跳(≤0.005)不得把冷启预算压短（否则 2.23Gpx 首解码必被误杀）。
+        try:
+            if v is not None and v > 0.02 and getattr(self, "_detect_guard", None) is not None:
+                self._detect_guard.start(20000)
+        except Exception:
+            pass
+
+    def _on_detect_timeout_ui(self):
+        """超时放弃等待：UI 恢复但提示"后台仍在解码，完成后再重试"。"""
+        try:
+            self.btn_detect.setEnabled(False)
+            self.progress.setValue(0)
+        except Exception:
+            pass
+        self._log(tr("main.detection_timed_out_background_still_decoding"))
+        self.statusBar().showMessage(tr("main.detection_timed_out_background_still_decoding"), 15000)
+
     def _on_detect_timeout(self):
         # 8s 看门狗：线程未发出任何信号视为卡死，断开连接避免后台结果再覆盖 UI，强制恢复。
         th = getattr(self, "_detect_thread", None)
@@ -3080,17 +3104,22 @@ class MainWindow(QMainWindow):
                 th.error.disconnect(self._on_detect_error)
             except Exception:
                 pass
-            # CORE-01：真卡死的线程要终止并回收，避免"幽灵线程"继续吃 CPU/内存
+            # v4.2.1（P0-2）：绝不能 terminate——线程可能正持有 _orig_gray_lock，
+            # 强杀会让锁永不释放、且缓存不写，导致后续检测/建系永久阻塞。
+            # 这里只做"放弃等待"：断开信号、协作式请求中断，让线程自行跑完（锁会释放）；
+            # 线程 finished 时恢复按钮，期间禁止重复发起检测。
             try:
                 th.requestInterruption()
             except Exception:
                 pass
             try:
-                th.terminate()
-                th.wait(2000)
+                th.finished.connect(self._on_detect_thread_finished, Qt.UniqueConnection)
             except Exception:
                 pass
-            self._on_detect_error(tr("main.cross_detection_timed_out_ui_forcibly_restored"))
+            self._detect_thread = th
+            self._on_detect_timeout_ui()
+            return
+        self._on_detect_error(tr("main.cross_detection_timed_out_ui_forcibly_restored"))
 
     def _on_detect_done(self, results: List[Optional[CrossResult]]):
         # G06: 检测期间换图 -> 旧代次结果丢弃（先判代次，再置预热标记，避免旧结果污染新图）
@@ -4196,7 +4225,18 @@ class MainWindow(QMainWindow):
             return []
         if self.template_nominal_points and len(self.template_nominal_points) == n + 1:
             # P1 + P3..P27 共 n+1 项，取 P3..P27 与检测点一一对应
-            return list(self.template_nominal_points[1:])
+            raw = [(float(x), float(y)) for x, y in self.template_nominal_points[1:]]
+            # v4.2.1（P1-2）：模板 D 列是历史口径（中心归零、Y 向下）；判定链是
+            # 原点绝对 + 物理 Y 向上，因此必须换算：ty = -ty_raw；角点模式再补中心偏移。
+            if self.grid is None:
+                return [(x, -y) for x, y in raw]
+            g = self.grid
+            if getattr(g, "origin_kind", "center") == "corner":
+                c0 = (int(g.cols) - 1) / 2.0
+                r0 = (int(g.rows) - 1) / 2.0
+                p = float(g.pitch_mm)
+                return [(x + c0 * p, -y - r0 * p) for x, y in raw]
+            return [(x, -y) for x, y in raw]
         if self.grid is None:
             return []
         nom = self.grid.nominal_points_mm(include_p1=self.chk_p1.isChecked())
@@ -4526,8 +4566,8 @@ class MainWindow(QMainWindow):
         rows = []
         # 固定名义值（以阵列几何中心为原点）：模板固定值优先，否则设计网格固定值
         nominal = self._nominal_mm_list()
-        # 导出与界面表格同基准：实测拟合阵列中心（消除点选偏移导致的整体平移假象）
-        center = self._center_measured_mm(self.results)
+        # v4.2.1（P1-3）：与表格/Excel 同基准——判定原点（绝对偏差、Y 向上）
+        center = self._judge_origin_mm()
         for i, r in enumerate(self.results):
             if r is None:
                 # F 模块：失败点保留行列位置——名义值列仍写固定名义值，

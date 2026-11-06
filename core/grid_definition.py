@@ -165,11 +165,9 @@ class GridDefinition:
         c0 = (self.cols - 1) / 2.0
         r0 = (self.rows - 1) / 2.0
         corner = self.origin_kind == "corner"
-        # v4.2：名义坐标 = 设计偏移（沿建系轴）× pitch，再按"物理 Y 向上为正"取反。
-        # 这样与轴的实际朝向解耦（阵列斜置/行方向朝上或朝下都自洽），
-        # 且名义值仍只由设计 pitch/行列数/方向轴决定（红线 1：不反推、不用实测间距）。
-        xv = np.asarray(self.x_dir_px, np.float64)
-        yv = np.asarray(self.y_dir_px, np.float64)
+        # v4.2.1：名义值固定在"纸面轴"上（+X 向右、+Y 向上），不随精化方向轴旋转。
+        # 因此阵列/纸张的旋转误差会真实暴露在偏差里（不会被建系轴吸收）。
+        # 名义值仍只由设计 pitch / 行列数 / origin_kind 决定（红线 1：不反推、不用实测间距）。
         pts: List[Tuple[float, float]] = []
         if include_p1:
             pts.append((0.0, 0.0))
@@ -177,9 +175,7 @@ class GridDefinition:
             for c in range(self.cols):
                 dc = float(c) if corner else (c - c0)
                 dr = float(r) if corner else (r - r0)
-                px = dc * self.pitch_mm * xv[0] + dr * self.pitch_mm * yv[0]
-                py = dc * self.pitch_mm * xv[1] + dr * self.pitch_mm * yv[1]
-                pts.append((float(px), float(-py)))   # 图像 y 向下 → 物理 Y 取反向上为正
+                pts.append((dc * self.pitch_mm, -dr * self.pitch_mm))
         return pts
 
     def rotate_dirs(self, deg_ccw: float) -> None:
@@ -241,14 +237,32 @@ class GridDefinition:
         }
 
     @classmethod
-    def from_dict(cls, d: dict) -> "GridDefinition":
-        return cls(rows=d.get("rows", 5), cols=d.get("cols", 5),
-                   pitch_mm=d.get("pitch_mm", 20.0), dpi=d.get("dpi", 4800.0),
-                   origin_px=tuple(d.get("origin_px", (0.0, 0.0))),
-                   x_dir_px=tuple(d.get("x_dir_px", (1.0, 0.0))),
-                   y_dir_px=tuple(d.get("y_dir_px", (0.0, 1.0))),
-                   measured_pitch_mm=d.get("measured_pitch_mm"),
-                   orthogonalize=bool(d.get("orthogonalize", False)))
+    def from_dict(cls, d: dict, ortho_max_dev_deg: float = 1.0) -> "GridDefinition":
+        """从工程 JSON 重建（CORE-04/CORE-11：加载侧加护栏，不信任存档）。
+
+        - 读回 origin_kind（v4.2 新字段，旧工程缺省 center）
+        - orthogonalize=True 且两轴夹角偏差超 ortho_max_dev_deg → 拒绝正交化，
+          记 `_ortho_rejected_on_load=True` 供调用方告警
+        """
+        g = cls(rows=d.get("rows", 5), cols=d.get("cols", 5),
+                pitch_mm=d.get("pitch_mm", 20.0), dpi=d.get("dpi", 4800.0),
+                origin_px=tuple(d.get("origin_px", (0.0, 0.0))),
+                x_dir_px=tuple(d.get("x_dir_px", (1.0, 0.0))),
+                y_dir_px=tuple(d.get("y_dir_px", (0.0, 1.0))),
+                measured_pitch_mm=d.get("measured_pitch_mm"),
+                orthogonalize=False,
+                origin_kind=str(d.get("origin_kind", "center")))
+        g._ortho_rejected_on_load = False
+        if bool(d.get("orthogonalize")):
+            gamma = float(g.axis_gamma_deg)
+            if abs(gamma - 90.0) <= float(ortho_max_dev_deg) and 45.0 <= gamma <= 135.0:
+                g.orthogonalize = True
+                x2, y2, delta = cls.orthonormalize(g.x_dir_px, g.y_dir_px)
+                g.x_dir_px, g.y_dir_px = (tuple(x2), tuple(y2))
+                g._ortho_correction_deg = float(delta)
+            else:
+                g._ortho_rejected_on_load = True
+        return g
 
 
 def estimate_pitch_px(pts: np.ndarray) -> float:

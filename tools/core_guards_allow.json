@@ -1,21 +1,25 @@
 {
-  "_note": "guard-only + v4.2 authorized origin_kind/nominal-by-axes (see 11_v4.2 report)",
+  "_note": "guards + v4.2/v4.2.1 authorized semantics (origin_kind, nominal axes, saver chain)",
   "files": {
     "core/calibrator.py": {
       "sha256": "4f45ae02add71e7880b52098844d007d98f9a0773daaa34706444427d4d1c9a9",
-      "reason": "guards / v4.2 authorized semantics"
+      "reason": "guards / v4.2-v4.2.1 authorized semantics"
     },
     "core/image_loader.py": {
       "sha256": "95efb9520e8d0f1b85e0466a2b3499ae05bf82b45d9906e088eea6f248ef47fb",
-      "reason": "guards / v4.2 authorized semantics"
+      "reason": "guards / v4.2-v4.2.1 authorized semantics"
     },
     "core/multi_pose_fit.py": {
       "sha256": "2848c3fa6bed5cd234410f830718d9ae8475a6b00f0ac2605a933eecda8b598f",
-      "reason": "guards / v4.2 authorized semantics"
+      "reason": "guards / v4.2-v4.2.1 authorized semantics"
     },
     "core/grid_definition.py": {
-      "sha256": "6c246966ad1ec25a013b3cec3101334bdfec2cf6060121ef3606598b1968dbdb",
-      "reason": "guards / v4.2 authorized semantics"
+      "sha256": "af2d0ca8f1c9c8b3887b8d3130dc23f03a7fc6de4ae5f90f77f2e92e2921d786",
+      "reason": "guards / v4.2-v4.2.1 authorized semantics"
+    },
+    "core/measurement_saver.py": {
+      "sha256": "e3523ae62d064e14ac95ca8c2cc3f705a15789c00ef148b47d9b6d2a51989b3c",
+      "reason": "guards / v4.2-v4.2.1 authorized semantics"
     }
   }
 }
