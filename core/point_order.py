@@ -25,15 +25,15 @@ MODE_TOP_LEFT_ROW_MAJOR = "top_left_row_major"
 MODE_TOP_LEFT_COL_MAJOR = "top_left_col_major"
 MODE_BOTTOM_LEFT_ROW_MAJOR = "bottom_left_row_major"
 MODE_BOTTOM_LEFT_COL_MAJOR = "bottom_left_col_major"
-DEFAULT_MODE = MODE_TOP_LEFT_ROW_MAJOR
+DEFAULT_MODE = MODE_BOTTOM_LEFT_ROW_MAJOR  # v4.3.1：14 要求起始点固定在图像左下角
 
 # 有序模式表（UI 下拉顺序）：label 中文/英文，tooltip 简释
 POINT_ORDER_MODES = [
-    (MODE_BOTTOM_LEFT_ROW_MAJOR, "左下起·行主序", "Bottom-left · Row-major",
+    (MODE_BOTTOM_LEFT_ROW_MAJOR, "左下起·行主序(默认)", "Bottom-left · Row-major (default)",
      "1 号在左下角，每行从左到右，行自下而上"),
     (MODE_TOP_LEFT_COL_MAJOR, "左上起·列主序", "Top-left · Column-major",
      "1 号在左上角，每列自上而下，列从左到右"),
-    (MODE_TOP_LEFT_ROW_MAJOR, "左上起·行主序(默认)", "Top-left · Row-major (default)",
+    (MODE_TOP_LEFT_ROW_MAJOR, "左上起·行主序", "Top-left · Row-major",
      "OpenCV 惯例：1 号在左上角，每行从左到右，行自上而下"),
     (MODE_BOTTOM_LEFT_COL_MAJOR, "左下起·列主序", "Bottom-left · Column-major",
      "1 号在左下角，每列自下而上，列从左到右"),

@@ -39,6 +39,10 @@ def main():
     chk(win.cb_method.currentIndex() == 1, "V1 默认检测方法=寻边法",
         "index=%d, text=%s" % (win.cb_method.currentIndex(), win.cb_method.currentText()))
     chk(win.calib_widget.chk_full.isChecked(), "V2 棋盘格面板原图处理默认勾选")
+    # V7：默认编号模式=左下起·行主序（起始点必须在图像左下角）
+    from core.point_order import DEFAULT_MODE, MODE_BOTTOM_LEFT_ROW_MAJOR
+    chk(DEFAULT_MODE == MODE_BOTTOM_LEFT_ROW_MAJOR and win._order_mode() == MODE_BOTTOM_LEFT_ROW_MAJOR,
+        "V7 默认编号模式=左下起·行主序", "%s / %s" % (DEFAULT_MODE, win._order_mode()))
 
     # V3：绿色十字按角度旋转（30°）
     view = win.view
