@@ -87,10 +87,62 @@ def main():
     chk(calls == [20000], "P0-1 真实进度续期 20s", str(calls))
 
     # ---- P0-2：超时路径不得 terminate ----
-    src = open(os.path.join(ROOT, "gui", "main_window.py"), encoding="utf-8").read()
-    seg = src[src.find("def _on_detect_timeout("): src.find("def _on_detect_done(")]
+    src_ = open(os.path.join(ROOT, "gui", "main_window.py"), encoding="utf-8").read()
+    seg = src_[src_.find("def _on_detect_timeout("): src_.find("def _on_detect_done(")]
     chk(".terminate(" not in seg, "P0-2 超时路径不再 terminate（避免持锁死锁）")
     chk("_on_detect_timeout_ui" in seg, "P0-2 超时走放弃等待 UI")
+
+    # ---- R1：放弃等待必须回收看门狗/断进度/禁用入口；finished 全量恢复 ----
+    calls = []
+
+    class Sig:
+        def connect(self, *a, **k):
+            pass
+        def disconnect(self, *a, **k):
+            pass
+
+    class FakeTh:
+        def __init__(self):
+            self.done = Sig(); self.error = Sig(); self.progress = Sig(); self.finished = Sig()
+            self.ir = 0
+        def isRunning(self):
+            return True
+        def requestInterruption(self):
+            self.ir += 1
+
+    class Guard2:
+        def __init__(self):
+            self.stop_n = 0
+        def start(self, ms):
+            pass
+        def stop(self):
+            self.stop_n += 1
+
+    from PyQt5.QtWidgets import QPushButton
+    win2 = MW.MainWindow()
+    win2.calibrated = True
+    win2._detect_guard = Guard2()
+    win2._detect_thread = FakeTh()
+    win2.btn_detect = QPushButton(); win2.btn_manual = QPushButton()
+    win2.btn_pick_next = QPushButton(); win2.btn_save_measure = QPushButton()
+    win2._on_detect_timeout()
+    g2 = win2._detect_guard
+    chk(g2.stop_n >= 1, "R1 放弃等待时停止看门狗", "stop=%d" % g2.stop_n)
+    chk(getattr(win2, "_detect_abandoned", False), "R1 标记 detect_abandoned")
+    chk(not win2.btn_detect.isEnabled(), "R1 放弃后禁用检测入口")
+    win2._on_detect_thread_finished()
+    chk(getattr(win2, "_detect_abandoned", False) is False, "R1 finished 清除 abandoned")
+    chk(getattr(win2, "_detect_thread", None) is None, "R1 finished 清空线程引用")
+    chk(win2.btn_manual.isEnabled(), "R1/R5 finished 恢复手动识别按钮")
+
+    # ---- R2：保存测量图片必须用判定原点 ----
+    seg2 = src_[src_.find("def _on_save_measure_images"): src_.find("def _on_save_measure_progress")]
+    chk("_judge_origin_mm()" in seg2 and "_center_measured_mm" not in seg2,
+        "R2 测量比对保存使用判定原点")
+
+    # ---- R3：Excel 模板名义列必须换算 ----
+    chk("export_nominal = self.template_nominal_points" not in src_, "R3 导出不再直接用模板原始值")
+    chk("export_nominal = self._template_nominal_judge()" in src_, "R3 导出走换算助手")
 
     print()
     print("RESULT =", "PASS" if not FAILS else "FAIL: " + "; ".join(FAILS))
@@ -99,3 +151,6 @@ def main():
 
 if __name__ == "__main__":
     sys.exit(main())
+
+
+

@@ -3001,6 +3001,16 @@ class MainWindow(QMainWindow):
         if self.grid is None:
             QMessageBox.information(self, tr("common.info"), tr("main.please_define_the_array_first"))
             return
+        # R1：被放弃等待的后台解码线程还没结束 → 拒绝重入（避免同名 timer/结果错配）
+        _th = getattr(self, "_detect_thread", None)
+        try:
+            if _th is not None and _th.isRunning():
+                QMessageBox.information(
+                    self, tr("common.info"),
+                    tr("main.background_decode_still_running_please_retry_later"))
+                return
+        except Exception:
+            pass
         # B1：检测前统一兜底正交化（覆盖自动建系/网格自校正等所有建系路径）。
         # _apply_ortho 幂等：已正交时修正量为 0，不会累积，也不会改动 origin/pitch。
         self._apply_ortho(self.grid, tr("main.pre_detection_fallback"))
@@ -3064,11 +3074,22 @@ class MainWindow(QMainWindow):
         QMessageBox.critical(self, tr("main.detection_failed"), tr("main.exception_in_cross_detection_thread_ui_restored_err_", err=brief))
 
     def _on_detect_thread_finished(self):
-        """被放弃等待的检测线程跑完后恢复入口（P0-2 配套）。"""
+        """被放弃等待的检测线程跑完后恢复入口（P0-2/R1 配套）。"""
+        g = getattr(self, "_detect_guard", None)
+        if g is not None:
+            try:
+                g.stop()
+            except Exception:
+                pass
+        self._detect_abandoned = False
         try:
             self._detect_thread = None
-            self.btn_detect.setEnabled(self.calibrated)
             self.progress.setValue(0)
+            self.btn_detect.setEnabled(self.calibrated)
+            self.btn_manual.setEnabled(self.calibrated)
+            if getattr(self, "results", None) and any(r is not None for r in self.results):
+                self.btn_save_measure.setEnabled(True)
+            self._update_pick_ui()
         except Exception:
             pass
 
@@ -3086,9 +3107,13 @@ class MainWindow(QMainWindow):
             pass
 
     def _on_detect_timeout_ui(self):
-        """超时放弃等待：UI 恢复但提示"后台仍在解码，完成后再重试"。"""
+        """超时放弃等待：禁用检测入口，提示"后台仍在解码，完成后再重试"。"""
+        for _b in ("btn_detect", "btn_manual", "btn_pick_next", "btn_save_measure"):
+            try:
+                getattr(self, _b).setEnabled(False)
+            except Exception:
+                pass
         try:
-            self.btn_detect.setEnabled(False)
             self.progress.setValue(0)
         except Exception:
             pass
@@ -3108,6 +3133,19 @@ class MainWindow(QMainWindow):
             # 强杀会让锁永不释放、且缓存不写，导致后续检测/建系永久阻塞。
             # 这里只做"放弃等待"：断开信号、协作式请求中断，让线程自行跑完（锁会释放）；
             # 线程 finished 时恢复按钮，期间禁止重复发起检测。
+            # v4.2.2（R1）：必须回收看门狗并断开线程进度，否则后台线程检测阶段的
+            # 进度会把同一个单例 timer 重新武装 → 20s 后假报超时；用户此间重试还会
+            # 让旧 timer 把新检测误判超时。
+            g = getattr(self, "_detect_guard", None)
+            if g is not None:
+                try:
+                    g.stop()
+                except Exception:
+                    pass
+            try:
+                th.progress.disconnect()
+            except Exception:
+                pass
             try:
                 th.requestInterruption()
             except Exception:
@@ -3116,12 +3154,17 @@ class MainWindow(QMainWindow):
                 th.finished.connect(self._on_detect_thread_finished, Qt.UniqueConnection)
             except Exception:
                 pass
+            self._detect_abandoned = True
             self._detect_thread = th
             self._on_detect_timeout_ui()
             return
         self._on_detect_error(tr("main.cross_detection_timed_out_ui_forcibly_restored"))
 
     def _on_detect_done(self, results: List[Optional[CrossResult]]):
+        # R1：已被判定超时放弃的旧线程结果一律丢弃
+        if getattr(self, "_detect_abandoned", False):
+            self._log(tr("main.stale_async_result_discarded"))
+            return
         # G06: 检测期间换图 -> 旧代次结果丢弃（先判代次，再置预热标记，避免旧结果污染新图）
         if self._is_stale_result(self.sender()):
             self._log(tr("main.stale_async_result_discarded"))
@@ -3604,6 +3647,15 @@ class MainWindow(QMainWindow):
         # 各算一次表格合成 RMS，取最优且必须优于不旋转（阈值 0.1%）才应用，
         # 否则保持原方向轴——宁可不精化，也绝不让误差变大。
         base_x, base_y = tuple(self.grid.x_dir_px), tuple(self.grid.y_dir_px)
+        # R4（v4.2.2）：v4.2.1 起名义值固定在纸面轴，旋转方向轴不再改变判定 RMS
+        # （候选恒同值、applied 恒 False）。跳过 62 次无效扫描，避免误导日志与耗时。
+        self._scan_count = 0
+        self._diag.update({
+            tr("main.refine_scan_candidates"): 0,
+            tr("main.zh_404f2bad"): tr("main.zh_c9744f45"),
+        })
+        self._log(tr("main.rigid_refinement_skipped_axis_independent_nominal"))
+        return
         rms_no = self._rms_with_dirs(base_x, base_y)
         # v3.2 方案A：候选池由「三候选」扩为「角度细扫」。
         # 原因（3.1 首测实测）：SVD 拟合发生在投影后的 (a,b) 基上，而该基本身非正交
@@ -4211,6 +4263,24 @@ class MainWindow(QMainWindow):
         except Exception:
             return self._center_theo_mm()
 
+    def _template_nominal_judge(self) -> List[Tuple[float, float]]:
+        """模板 D 列（历史：中心归零、Y 向下）→ 判定系（原点绝对、Y 向上）。
+
+        含 P1 基准行（首项 (0,0)）；角点模式再补中心偏移。表/Excel/CSV 同源。
+        """
+        raw = [(float(x), float(y)) for x, y in (self.template_nominal_points or [])]
+        if not raw:
+            return []
+        g = self.grid
+        if g is not None and getattr(g, "origin_kind", "center") == "corner":
+            c0 = (int(g.cols) - 1) / 2.0
+            r0 = (int(g.rows) - 1) / 2.0
+            p = float(g.pitch_mm)
+            out = [(raw[0][0], -raw[0][1])]
+            out += [(x + c0 * p, -y - r0 * p) for x, y in raw[1:]]
+            return out
+        return [(x, -y) for x, y in raw]
+
     def _nominal_mm_list(self) -> List[Tuple[float, float]]:
         """与 self.results 逐点对应的固定名义值（以阵列几何中心为原点，mm）。
 
@@ -4225,18 +4295,7 @@ class MainWindow(QMainWindow):
             return []
         if self.template_nominal_points and len(self.template_nominal_points) == n + 1:
             # P1 + P3..P27 共 n+1 项，取 P3..P27 与检测点一一对应
-            raw = [(float(x), float(y)) for x, y in self.template_nominal_points[1:]]
-            # v4.2.1（P1-2）：模板 D 列是历史口径（中心归零、Y 向下）；判定链是
-            # 原点绝对 + 物理 Y 向上，因此必须换算：ty = -ty_raw；角点模式再补中心偏移。
-            if self.grid is None:
-                return [(x, -y) for x, y in raw]
-            g = self.grid
-            if getattr(g, "origin_kind", "center") == "corner":
-                c0 = (int(g.cols) - 1) / 2.0
-                r0 = (int(g.rows) - 1) / 2.0
-                p = float(g.pitch_mm)
-                return [(x + c0 * p, -y - r0 * p) for x, y in raw]
-            return [(x, -y) for x, y in raw]
+            return list(self._template_nominal_judge()[1:])
         if self.grid is None:
             return []
         nom = self.grid.nominal_points_mm(include_p1=self.chk_p1.isChecked())
@@ -4516,7 +4575,8 @@ class MainWindow(QMainWindow):
         if not out_dir:
             return
         nominal = self._nominal_mm_list()
-        center = self._center_measured_mm(self.results)
+        # R2（v4.2.2）：与表格/Excel 同基准——判定原点（绝对偏差、Y 向上）
+        center = self._judge_origin_mm()
         self.btn_save_measure.setEnabled(False)
         self.progress.setRange(0, len(self.results))
         self.progress.setValue(0)
@@ -4648,7 +4708,8 @@ class MainWindow(QMainWindow):
         # 名义值来源：模板固定值（含 P1 基准行）优先；否则按界面配置
         # "含中心基准点 P1" 生成固定设计网格名义值（含 P1=26 项 / 不含=25 项）
         if self.template_nominal_points:
-            export_nominal = self.template_nominal_points
+            # R3（v4.2.2）：模板 D 列是"中心归零/Y 向下"，导出前统一换算到判定系
+            export_nominal = self._template_nominal_judge()
             export_include_p1 = True
         else:
             export_nominal = self.grid.nominal_points_mm(
