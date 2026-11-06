@@ -1,5 +1,5 @@
 {
-  "_note": "guards + v4.2/v4.2.1 authorized semantics (origin_kind, nominal axes, saver chain)",
+  "_note": "guards + v4.2-v4.2.4 authorized semantics/fixes",
   "files": {
     "core/calibrator.py": {
       "sha256": "4f45ae02add71e7880b52098844d007d98f9a0773daaa34706444427d4d1c9a9",
@@ -20,6 +20,10 @@
     "core/measurement_saver.py": {
       "sha256": "e3523ae62d064e14ac95ca8c2cc3f705a15789c00ef148b47d9b6d2a51989b3c",
       "reason": "guards / v4.2-v4.2.1 authorized semantics"
+    },
+    "core/excel_exporter.py": {
+      "sha256": "b21f317808d53518f2764d6d6eb235fbeb04eeb98e6fef69a1eec486d6b4d56e",
+      "reason": "v4.2.4 authorized fix: Sheet1 nominal indexed by rank (order-mode mismatch)"
     }
   }
 }

@@ -179,10 +179,12 @@ def build_point_rows(results: List[dict],
     disp = display_order(rows, cols, order) if (rows and cols) else list(range(len(results)))
     for i, rank in enumerate(disp):
         r = results[rank]
+        # v4.2.4 修复：nominal_points 与 results 同序（按 rank 索引），
+        # 不能按显示序号 i 索引——编号模式非"左上起行主序"时会把名义值配到别的点。
         if has_p1:
-            fixed = nominal_points[i + 1] if i + 1 < len(nominal_points) else None
+            fixed = nominal_points[rank + 1] if rank + 1 < len(nominal_points) else None
         elif nominal_points is not None:
-            fixed = nominal_points[i] if i < len(nominal_points) else None
+            fixed = nominal_points[rank] if rank < len(nominal_points) else None
         else:
             fixed = None
         emit(f"P{i + 3}", r, fixed)
@@ -279,7 +281,9 @@ def export_excel(path: str,
     pass_fill = PatternFill("solid", fgColor="E2EFDA")
     ng_fill = PatternFill("solid", fgColor="FCE4EC")
     fail_fill = PatternFill("solid", fgColor="EDEDED")
-    for i, r in enumerate(results, 1):
+    _disp2 = display_order(rows, cols, order) if (rows and cols) else list(range(len(results)))
+    for _k2, _rank2 in enumerate(_disp2, 1):
+        r = results[_rank2]
         verdict = r.get("verdict", "")
         if _is_fail(r):
             # F 模块：失败行实测列统一写 "--"（与 CSV/GUI 口径一致，不写伪造值）
@@ -289,7 +293,7 @@ def export_excel(path: str,
             px_x, px_y = _fmt(r.get("px_x")), _fmt(r.get("px_y"))
             mm_x, mm_y = _fmt(r.get("mm_x")), _fmt(r.get("mm_y"))
             dx, dy, dev = (_fmt(r.get("dx")), _fmt(r.get("dy")), _fmt(r.get("dev")))
-        seq_no = display_no(i - 1, rows, cols, order)
+        seq_no = display_no(_rank2, rows, cols, order)
         conf_val = r.get("conf") if not _is_fail(r) else "--"
         if conf_val is not None:
             conf_val = round(float(conf_val), 3) if not isinstance(conf_val, str) else conf_val
@@ -298,16 +302,17 @@ def export_excel(path: str,
                     _fmt(r.get("theo_x")), _fmt(r.get("theo_y")),
                     dx, dy, dev,
                     verdict, conf_val, r.get("status", "OK")])
+        _row_idx = _k2 + 1
         if _is_fail(r):
             # F 模块：失败行浅灰底 + 斜体，与成功点视觉区分
-            for c in ws2[i + 1]:
+            for c in ws2[_row_idx]:
                 c.fill = fail_fill
                 c.font = Font(italic=True)
         elif verdict == "NG":
-            for c in ws2[i + 1]:
+            for c in ws2[_row_idx]:
                 c.fill = ng_fill
         elif verdict == "Pass":
-            for c in ws2[i + 1]:
+            for c in ws2[_row_idx]:
                 c.fill = pass_fill
     # ---- F 模块：统计区（失败计数独立 + 误差统计排除失败行 + 失败点行列清单）----
     fail_rows = [r for r in results if _is_fail(r)]
@@ -338,9 +343,10 @@ def export_excel(path: str,
         ws2.append([])
         ws2.append(["失败点行列清单（便于定位图纸位置补测）" if zh else "Failed points list (for locating & re-test)"])
         ws2.append(["序号", "行", "列", "名义X(mm)", "名义Y(mm)", "状态"] if zh else ["No.", "Row", "Col", "Nominal X(mm)", "Nominal Y(mm)", "Status"])
-        for i, r in enumerate(results, 1):
+        for i, rank in enumerate(_disp2, 1):
+            r = results[rank]
             if _is_fail(r):
-                ws2.append([display_no(i - 1, rows, cols, order), r.get("row", ""), r.get("col", ""),
+                ws2.append([display_no(rank, rows, cols, order), r.get("row", ""), r.get("col", ""),
                             _fmt(r.get("theo_x")), _fmt(r.get("theo_y")),
                             r.get("status", "DETECT_FAIL")])
     for j, w in enumerate([8, 6, 6, 14, 14, 14, 14, 14, 14, 14, 14, 14, 12, 14], 1):
@@ -449,5 +455,6 @@ def export_csv(path: str,
                         _fmt(p["X实测"]), _fmt(p["Y实测"]),
                         _fmt(p["X误差"]), _fmt(p["Y误差"]), p["判定"]])
     return path
+
 
 
