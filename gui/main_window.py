@@ -2040,7 +2040,19 @@ class MainWindow(QMainWindow):
             self._update_status_card()
             if not had:
                 return
+            # V41-02：改间距/行列只让"网格+结果"失效；点选点与阵列中心是几何锚点，
+            # 与参数无关，必须保留（否则"先自动建系定中心→再按参数铺网格"会丢中心）。
+            _keep_picked = list(getattr(self, "_picked", [None, None, None]))
+            _keep_origin = getattr(self, "origin_xy", None)
+            _keep_manual = getattr(self, "_manual_grid_snapshot", None)
             self._reset_pick()
+            self._picked = _keep_picked
+            self.origin_xy = _keep_origin
+            self._manual_grid_snapshot = _keep_manual
+            try:
+                self._refresh_pick_marks()
+            except Exception:
+                pass
             self._log(tr("main.array_params_changed_results_cleared"))
             self.statusBar().showMessage(tr("main.array_params_changed_results_cleared"), 8000)
         except Exception:
@@ -2218,9 +2230,10 @@ class MainWindow(QMainWindow):
         """
         if g is None:
             return g
-        # 无论开关如何，先把标志同步为"本网格是否已按正交基使用"，保证 to_dict 如实存盘
-        g.orthogonalize = bool(self._ortho_on())
+        # CORE-04：只在真正接受正交化时才置 orthogonalize=True；
+        # 被护栏拒绝的网格必须保持 False，否则工程存盘/加载（from_dict 无护栏）会静默生效。
         if not self._ortho_on():
+            g.orthogonalize = False
             return g
         before = float(g.axis_gamma_deg)
         dev = abs(before - 90.0)
@@ -2228,6 +2241,7 @@ class MainWindow(QMainWindow):
             self._gamma_click_deg = before
             self._ortho_corr_deg = 0.0
             self._ortho_rejected = True
+            g.orthogonalize = False
             self._log(tr("main.frame_orthogonalization_skipped_picked_axis_angle_g_",
                          g=before, d=dev, m=ORTHO_MAX_DEV_DEG, s=why))
             self.statusBar().showMessage(
@@ -2338,10 +2352,16 @@ class MainWindow(QMainWindow):
         u_rows = int(self.sp_rows.value())
         u_cols = int(self.sp_cols.value())
         o = self._picked[0]
-        if o is None:
-            # 完全不点选：以图像中心为原点、图像轴为方向（明确告知这是"快速模式"）
-            o = (src.origin_w / 2.0, src.origin_h / 2.0)
-            self._log(tr("main.grid_built_from_params_image_center"))
+        is_center = o is None
+        if is_center:
+            # 优先用自动建系精测出的阵列中心（B3 origin_xy），避免图像中心偏置
+            ox = getattr(self, "origin_xy", None)
+            if isinstance(ox, (tuple, list)) and len(ox) == 2:
+                o = (float(ox[0]), float(ox[1]))
+                self._log(tr("main.grid_built_from_params_array_center"))
+            else:
+                o = (src.origin_w / 2.0, src.origin_h / 2.0)
+                self._log(tr("main.grid_built_from_params_image_center"))
         x = None
         if self._picked[1] is not None and self._picked[0] is not None:
             x = (self._picked[1][0] - self._picked[0][0],
@@ -2354,6 +2374,18 @@ class MainWindow(QMainWindow):
             x = (1.0, 0.0)
         if y is None:
             y = (-x[1], x[0])
+        # CORE-03：GridDefinition.origin_px 是 row0col0 角点；若手里是"阵列中心"，
+        # 必须减 (n-1)/2 个设计间距换算成角点，否则整块网格偏移半幅。
+        if is_center:
+            _ppx = float(self.sp_pitch.value()) * float(self.sp_dpi.value()) / 25.4
+            _nx = (max(1.0, float(x[0])) ** 2 + float(x[1]) ** 2) ** 0.5
+            _ny = (float(y[0]) ** 2 + float(y[1]) ** 2) ** 0.5
+            _xu = (float(x[0]) / _nx, float(x[1]) / _nx)
+            _yu = (float(y[0]) / _ny, float(y[1]) / _ny)
+            _hc = (u_cols - 1) / 2.0
+            _hr = (u_rows - 1) / 2.0
+            o = (float(o[0]) - _hc * _ppx * _xu[0] - _hr * _ppx * _yu[0],
+                 float(o[1]) - _hc * _ppx * _xu[1] - _hr * _ppx * _yu[1])
         self.grid = GridDefinition(rows=u_rows, cols=u_cols,
                                    pitch_mm=float(self.sp_pitch.value()),
                                    dpi=float(self.sp_dpi.value()),
@@ -2422,8 +2454,16 @@ class MainWindow(QMainWindow):
         box.exec_()
         clicked = box.clickedButton()
         if clicked is btn_det:
-            self.sp_rows.setValue(d_rows)
-            self.sp_cols.setValue(d_cols)
+            # V41-01：改行列属于"形状仲裁"，不应触发 G10 失效（否则清掉手动三点基准，
+            # 手动优先分支永远进不去）。用 _suppress_invalidate 包裹 setValue。
+            _prev = getattr(self, "_suppress_invalidate", False)
+            self._suppress_invalidate = True
+            try:
+                self.sp_rows.setValue(d_rows)
+                self.sp_cols.setValue(d_cols)
+            finally:
+                self._suppress_invalidate = _prev
+            self._update_status_card()
             self._log(tr("main.array_shape_used_detected", r=d_rows, c=d_cols))
             return (d_rows, d_cols)
         if clicked is btn_user:
@@ -2538,6 +2578,8 @@ class MainWindow(QMainWindow):
             self.lbl_pick_progress.setText(tr("main.auto_frame_built_frame_no_manual_points"))
         except Exception:
             pass
+        # 自动建系在 AutoFrameThread 内已解码原始灰度，视为已预热
+        self._gray_warm = True
         # 刷新预览标记（与 _finish_pick 一致）
         pts = self.grid.points_px()
         s = self.src.scale
@@ -2622,7 +2664,15 @@ class MainWindow(QMainWindow):
                                              parent=self, ref_angle_deg=self._grid_ref_angle_deg())
         self._detect_thread._gen = getattr(self, "_src_gen", 0)   # G06: 代次
         self._detect_thread.setPriority(QThread.LowPriority)  # 让出调度优先级，保障界面响应
-        self._detect_thread.progress.connect(lambda v: self.progress.setValue(int(v * 100)))
+        def _on_detect_progress(v):
+            self.progress.setValue(int(v * 100))
+            # V41-03：有进度说明线程在动，按活跃续期（初始 30s 覆盖首次解码）
+            try:
+                if getattr(self, "_detect_guard", None) is not None:
+                    self._detect_guard.start(15000)
+            except Exception:
+                pass
+        self._detect_thread.progress.connect(_on_detect_progress)
         self._detect_thread.done.connect(self._on_detect_done)
         self._detect_thread.error.connect(self._on_detect_error)
         # 8s 看门狗：极端场景（线程卡死不发任何信号）下强制恢复 UI，避免永久"重新检测中…"
@@ -2631,7 +2681,12 @@ class MainWindow(QMainWindow):
         self._detect_guard.timeout.connect(self._on_detect_timeout)
         # v4.1：首次检测需要解码原始灰度（2.23Gpx 图可达数十秒），8s 必误杀。
         # 已预热（之前解码过）仍用 8s 兜底；未预热给 30s。
-        _guard_ms = 8000 if getattr(self, "_gray_warm", False) else 30000
+        # CORE-01：预热后按点数放大兜底时间（每点约 0.4s，至少 8s）；
+        # 未预热给 30s 覆盖首次 2.23Gpx 解码；进度信号会再续期 15s。
+        if getattr(self, "_gray_warm", False):
+            _guard_ms = max(8000, 1500 + 400 * max(1, len(pts)))
+        else:
+            _guard_ms = 30000
         self._detect_guard.start(_guard_ms)
         _round = int(getattr(self, "_auto_correct_count", 0))
         _suffix = tr("main.detect_auto_round_suffix", n=_round) if _round > 0 else ""
@@ -2664,11 +2719,11 @@ class MainWindow(QMainWindow):
             self._on_detect_error(tr("main.cross_detection_timed_out_8s_ui_forcibly_restored_an"))
 
     def _on_detect_done(self, results: List[Optional[CrossResult]]):
-        self._gray_warm = True
-        # G06: 检测期间换图 -> 旧代次结果丢弃
+        # G06: 检测期间换图 -> 旧代次结果丢弃（先判代次，再置预热标记，避免旧结果污染新图）
         if self._is_stale_result(self.sender()):
             self._log(tr("main.stale_async_result_discarded"))
             return
+        self._gray_warm = True
         if self.grid is None:
             # G02: detection finished after the frame was reset/re-picked (grid=None);
             # downstream code dereferences grid, so discard the stale result instead of crashing.
@@ -2879,23 +2934,25 @@ class MainWindow(QMainWindow):
             # v4.1：不再自动改写网格并多轮重测（避免"用检测结果改网格"的循环）。
             # 只记录一次建议，用户参数（设计 pitch）保持权威；需要时由用户手动执行。
             _design = float(self.grid.pitch_mm) if self.grid is not None else 0.0
+            _design_dev = ((abs(float(pitch_mm_new) - _design) / _design * 100.0)
+                           if _design > 0 else 0.0)
             self._grid_correction_suggestion = {
                 "measured_pitch_mm": float(pitch_mm_new),
                 "design_pitch_mm": _design,
-                "design_dev_pct": ((abs(float(pitch_mm_new) - _design) / _design * 100.0)
-                                   if _design > 0 else 0.0),
-                "pitch_dev_pct": float(pct * 100.0),
+                "design_dev_pct": _design_dev,
+                # CORE-02：对外的"间距偏差%"统一相对设计 pitch（与 Excel 一致）
+                "pitch_dev_pct": float(_design_dev),
                 "angle_dev_deg": float(max(ang_x, ang_y)),
                 "origin_dev_mm": float(d_origin_mm),
                 "pred_edge_mm": float(pred_edge),
             }
             self._diag[tr("main.zh_2ac41737")] = tr(
                 "main.grid_correction_suggested", mm=pitch_mm_new,
-                pct=pct * 100.0, pred=pred_edge)
+                pct=_design_dev, pred=pred_edge)
             self._log(tr("main.grid_correction_suggested", mm=pitch_mm_new,
-                         pct=pct * 100.0, pred=pred_edge))
+                         pct=_design_dev, pred=pred_edge))
             self.statusBar().showMessage(tr("main.grid_correction_suggested",
-                                            mm=pitch_mm_new, pct=pct * 100.0,
+                                            mm=pitch_mm_new, pct=_design_dev,
                                             pred=pred_edge), 12000)
             return False
         else:
@@ -3662,7 +3719,9 @@ class MainWindow(QMainWindow):
         if not theo:
             return None
         r, c = self.grid.rows, self.grid.cols
-        cidx = (r // 2) * c + (c // 2)
+        # CORE-05：几何中心取 (n-1)/2（与 nominal_points_mm / _center_measured_mm 同口径），
+        # 避免偶数阵列落到 r//2 的半格位置
+        cidx = int(round((r - 1) / 2.0)) * c + int(round((c - 1) / 2.0))
         if cidx < len(theo):
             return theo[cidx]
         return theo[len(theo) // 2] if theo else None
