@@ -99,6 +99,7 @@ class ImageView(QGraphicsView):
         self._manual_sel_idx = -1
         self._last_hover = None
         self._overlay_items = []
+        self._nominal_items = []   # v4.1 设计名义网格线（细线，独立开关）
         self._pick_graphics = []
         self._pick_points = []
         self._sel_rings = {}
@@ -146,6 +147,7 @@ class ImageView(QGraphicsView):
         self._manual_loupe = None
         self._manual_loupe_border = None
         self._overlay_items = []
+        self._nominal_items = []
         self._pick_graphics = []
         self._pick_points = []
         self._sel_rings = {}
@@ -302,6 +304,40 @@ class ImageView(QGraphicsView):
         self._scene.addItem(r)
         self._overlay_items.append(r)
         return r
+
+    def add_grid_lines(self, rows: int, cols: int, pts, color: str = "#8e8e93",
+                       pen_w: float = 1.0, dash: bool = True):
+        """v4.1：叠加「设计名义网格」细线（scene/预览坐标）。
+
+        pts: 行主序的预览坐标列表，长度 rows*cols（来自 grid.points_px()/scale）。
+        只画行/列方向的连线，不注册 pick_idx、不进 _label_items；登记 _overlay_items
+        与 _nominal_items（供「名义网格」开关独立显隐）。
+        """
+        if not pts or rows <= 0 or cols <= 0 or len(pts) < rows * cols:
+            return []
+        pen = QPen(QColor(color), pen_w)
+        if dash:
+            pen.setStyle(Qt.DashLine)
+        items = []
+        # 行方向：每行连一条横线
+        for r in range(rows):
+            x0, y0 = pts[r * cols]
+            x1, y1 = pts[r * cols + cols - 1]
+            ln = QGraphicsLineItem(x0, y0, x1, y1)
+            ln.setPen(pen)
+            self._scene.addItem(ln)
+            items.append(ln)
+        # 列方向：每列连一条竖线
+        for c in range(cols):
+            x0, y0 = pts[c]
+            x1, y1 = pts[(rows - 1) * cols + c]
+            ln = QGraphicsLineItem(x0, y0, x1, y1)
+            ln.setPen(pen)
+            self._scene.addItem(ln)
+            items.append(ln)
+        self._overlay_items.extend(items)
+        self._nominal_items.extend(items)
+        return items
 
     # ---------- B5 核对锚点（原点 O / 起始点角标） ----------
     def add_origin_mark(self, px: float, py: float, x_dir=(1.0, 0.0), y_dir=(0.0, 1.0),

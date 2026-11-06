@@ -3,7 +3,7 @@
 import hashlib
 import json, os, py_compile, sys
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-BASELINE = os.environ.get("GCV_BASELINE_SRC", "")  # 可选：用于 core 基线字节对比
+BASELINE = r"E:\GalvoCalibVision_项目交接_20261025\03_源码工程\GalvoCalibVision_src_v3.3_正交化"
 fails = []
 def say(ok, msg):
     print(("PASS  " if ok else "FAIL  ") + msg)

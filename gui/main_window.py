@@ -1152,7 +1152,7 @@ class MainWindow(QMainWindow):
             self.op_card = ui_kit.card(tr("main.this_step_actions"))
             _ol = self.op_card.layout()
             self.btn_apply_next = ui_kit.btn(tr("main.apply_array_next_step"), "primary")
-            self.btn_apply_next.clicked.connect(lambda: self.tabs.setCurrentIndex(2))
+            self.btn_apply_next.clicked.connect(self._on_apply_next)
             _ol.addWidget(self.btn_apply_next)
             _nav = QHBoxLayout()
             _nav.setSpacing(8)
@@ -1271,7 +1271,12 @@ class MainWindow(QMainWindow):
         self.chk_overlay = QCheckBox(tr("main.overlay_marks"))
         self.chk_overlay.setChecked(True)
         self.chk_overlay.toggled.connect(self._toggle_overlay)
-        for _w in (self.btn_zoom_out, self.btn_zoom_in, self.btn_zoom_fit, self.chk_overlay):
+        self.chk_nominal = QCheckBox(tr("main.nominal_grid"))
+        self.chk_nominal.setChecked(True)
+        self.chk_nominal.setToolTip(tr("main.nominal_grid_tip"))
+        self.chk_nominal.toggled.connect(self._toggle_nominal)
+        for _w in (self.btn_zoom_out, self.btn_zoom_in, self.btn_zoom_fit,
+                   self.chk_overlay, self.chk_nominal):
             _pb.addWidget(_w)
         vr.addWidget(self.preview_bar)
         self.lbl_preview_placeholder = QLabel(tr("main.preview_placeholder"), self.view)
@@ -1707,6 +1712,49 @@ class MainWindow(QMainWindow):
                 it = getattr(v, attr, None)
                 if it is not None:
                     it.setVisible(bool(on))
+            # 总开关恢复时，按「名义网格」自己的开关重新应用，避免被一起点亮
+            if on:
+                self._toggle_nominal(self.chk_nominal.isChecked())
+        except Exception:
+            pass
+
+    def _toggle_nominal(self, on: bool):
+        """v4.1：显示/隐藏「设计名义网格」细线（独立于点标记与叠加总开关）。"""
+        try:
+            v = self.view
+            items = getattr(v, "_nominal_items", [])
+            if not items and on:
+                self._draw_nominal_grid()
+                items = getattr(v, "_nominal_items", [])
+            for it in items:
+                it.setVisible(bool(on))
+        except Exception:
+            pass
+
+    def _draw_nominal_grid(self, grid_pts=None):
+        """v4.1：把设计名义网格（设计 pitch、阵列中心原点）画成细线。
+
+        网格间距恒为设计值（grid.measured_pitch_mm 已不参与建网格），
+        因此这些线代表"应该在哪里"；实际检测十字与它的偏差肉眼可见。
+        """
+        if self.grid is None or self.src is None:
+            return
+        try:
+            if getattr(self, "chk_nominal", None) is not None and not self.chk_nominal.isChecked():
+                return
+            s = self.src.scale
+            g = self.grid
+            # v4.1：名义网格 = 设计间距（pitch_mm），与检测窗间距（可能为实测）解耦
+            dp = float(g.pitch_mm) * float(g.dpi) / 25.4
+            ox, oy = float(g.origin_px[0]), float(g.origin_px[1])
+            xv = (float(g.x_dir_px[0]) * dp, float(g.x_dir_px[1]) * dp)
+            yv = (float(g.y_dir_px[0]) * dp, float(g.y_dir_px[1]) * dp)
+            pts = []
+            for r in range(int(g.rows)):
+                for c in range(int(g.cols)):
+                    pts.append((ox + c * xv[0] + r * yv[0], oy + c * xv[1] + r * yv[1]))
+            pv = [self._pv(float(x) / s, float(y) / s) for x, y in pts]
+            self.view.add_grid_lines(int(g.rows), int(g.cols), pv)
         except Exception:
             pass
 
@@ -1910,6 +1958,7 @@ class MainWindow(QMainWindow):
         # 先标定（显示源=棋盘格）再导入相纸后，_pv() 仍用棋盘格的 preview_scale，
         # 导致点选标记/阵列十字整体错位（本次线上 bug 的根因）。
         self._preview_src = src
+        self._gray_warm = False
         try:
             self.lbl_preview_placeholder.hide()
         except Exception:
@@ -2240,6 +2289,8 @@ class MainWindow(QMainWindow):
         self._apply_ortho(self.grid, tr("main.manual_3_point_frame"))
         # 手动基准快照：供自动建系手动优先（G1/G2/G5）对比与克隆基准使用
         self._manual_grid_snapshot = self.grid
+        self._array_source = "manual"
+        self._measured_pitch_mm = None
         pts = self.grid.points_px()
         s = self.src.scale
         n = len(pts)
@@ -2260,6 +2311,64 @@ class MainWindow(QMainWindow):
                      rows=self.grid.rows, cols=self.grid.cols,
                      pitch=self.grid.pitch_mm, n=len(pts)))
         self._refresh_flow()
+
+    def _on_apply_next(self):
+        """「应用阵列（下一步）」：没有网格时，允许"按参数铺网格"（跳过建系）。
+
+        v4.1：阵列参数（行列/间距）是权威来源。若用户已点起点，就直接用
+        该点 + 参数铺设计网格（方向默认取图像轴，或已点的方向点）；
+        完全不点也可以：用图像中心 + 图像轴 + 设计间距铺网格并明确提示。
+        """
+        if self.grid is None and self.src is not None:
+            if not self._build_grid_from_params():
+                return
+        elif self.grid is None:
+            QMessageBox.information(self, tr("common.info"),
+                                    tr("main.please_import_a_scan_image_first"))
+            return
+        if hasattr(self, "tabs"):
+            self.tabs.setCurrentIndex(2)
+        self._refresh_flow()
+
+    def _build_grid_from_params(self) -> bool:
+        """按用户参数（行列/间距/DPI）铺设计网格；方向取图像轴或已点方向点。"""
+        src = self.src
+        if src is None:
+            return False
+        u_rows = int(self.sp_rows.value())
+        u_cols = int(self.sp_cols.value())
+        o = self._picked[0]
+        if o is None:
+            # 完全不点选：以图像中心为原点、图像轴为方向（明确告知这是"快速模式"）
+            o = (src.origin_w / 2.0, src.origin_h / 2.0)
+            self._log(tr("main.grid_built_from_params_image_center"))
+        x = None
+        if self._picked[1] is not None and self._picked[0] is not None:
+            x = (self._picked[1][0] - self._picked[0][0],
+                 self._picked[1][1] - self._picked[0][1])
+        y = None
+        if self._picked[2] is not None and self._picked[0] is not None:
+            y = (self._picked[2][0] - self._picked[0][0],
+                 self._picked[2][1] - self._picked[0][1])
+        if x is None:
+            x = (1.0, 0.0)
+        if y is None:
+            y = (-x[1], x[0])
+        self.grid = GridDefinition(rows=u_rows, cols=u_cols,
+                                   pitch_mm=float(self.sp_pitch.value()),
+                                   dpi=float(self.sp_dpi.value()),
+                                   origin_px=(float(o[0]), float(o[1])),
+                                   x_dir_px=(float(x[0]), float(x[1])),
+                                   y_dir_px=(float(y[0]), float(y[1])))
+        self._apply_ortho(self.grid, tr("main.grid_built_from_params"))
+        self._array_source = "params"
+        self._measured_pitch_mm = None
+        self._manual_grid_snapshot = self.grid
+        self._redraw_marks()
+        self._log(tr("main.grid_built_from_params_rows_cols_pitch",
+                     r=u_rows, c=u_cols, p="%.3f" % float(self.sp_pitch.value())))
+        self.statusBar().showMessage(tr("main.grid_built_from_params"))
+        return True
 
     # ---------------- 自动建系（D4：内角点建系 + 手动走向融合） ----------------
     def _on_auto_frame(self):
@@ -2289,6 +2398,39 @@ class MainWindow(QMainWindow):
             self._auto_frame_worker = None
             self.btn_auto_frame.setEnabled(True)
 
+    def _resolve_array_shape(self, res):
+        """v4.1：阵列行列以用户参数为权威；自动检测结果只作校验。
+
+        返回 (rows, cols)；用户取消选择时返回 None。
+        不一致时弹窗让用户选（默认按参数），符合"阵列可选、参数优先"的约定。
+        """
+        u_rows = int(self.sp_rows.value())
+        u_cols = int(self.sp_cols.value())
+        d_rows = int(getattr(res, "rows", 0) or 0)
+        d_cols = int(getattr(res, "cols", 0) or 0)
+        if d_rows <= 0 or d_cols <= 0:
+            return (u_rows, u_cols)
+        if (d_rows, d_cols) == (u_rows, u_cols):
+            return (u_rows, u_cols)
+        box = QMessageBox(self)
+        box.setWindowTitle(tr("main.array_shape_mismatch_title"))
+        box.setText(tr("main.array_shape_mismatch_msg",
+                       ur=u_rows, uc=u_cols, dr=d_rows, dc=d_cols))
+        btn_user = box.addButton(tr("main.use_user_params"), QMessageBox.AcceptRole)
+        btn_det = box.addButton(tr("main.use_detected_shape"), QMessageBox.AcceptRole)
+        box.addButton(tr("main.cancel"), QMessageBox.RejectRole)
+        box.exec_()
+        clicked = box.clickedButton()
+        if clicked is btn_det:
+            self.sp_rows.setValue(d_rows)
+            self.sp_cols.setValue(d_cols)
+            self._log(tr("main.array_shape_used_detected", r=d_rows, c=d_cols))
+            return (d_rows, d_cols)
+        if clicked is btn_user:
+            self._log(tr("main.array_shape_used_params", r=u_rows, c=u_cols))
+            return (u_rows, u_cols)
+        return None
+
     def _on_auto_frame_done(self, payload):
         # G05: 旧图代次的结果直接丢弃，避免写到新图上
         if self._is_stale_result(self.sender()):
@@ -2313,6 +2455,11 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, tr("main.auto_framing_failed"),
                                 tr("main.no_regular_array_detected_msg", msg=res.message or tr("main.not_enough_corner_points")))
             return
+        _shape = self._resolve_array_shape(res)
+        if _shape is None:
+            self.statusBar().showMessage(tr("main.auto_framing_cancelled_original_grid_kept"))
+            return
+        u_rows, u_cols = _shape
         # 手动优先（P0/P1：G1/G2/G5）：三点齐全且已有手动网格时，
         # 手动为基准克隆 origin/x_dir/y_dir，自动补 rows/cols/measured_pitch_mm；
         # 差异超阈值弹窗让用户选基准，未超阈值直接以手动为准。
@@ -2340,20 +2487,20 @@ class MainWindow(QMainWindow):
                 use_manual = clicked == btn_manual
                 if use_manual:
                     self.grid = build_grid_manual_first(
-                        fit, manual_grid, res.rows, res.cols, dpi, nominal_pitch,
+                        fit, manual_grid, u_rows, u_cols, dpi, nominal_pitch,
                         use_manual=True)
                     status_extra = tr("main.grid_built_from_manual_baseline")
                 else:
                     mp = float((fit.pitch_x_px + fit.pitch_y_px) / 2.0) * 25.4 / max(1e-6, dpi)
                     self.grid = build_grid_from_frame(
-                        fit, res.rows, res.cols, dpi=dpi,
+                        fit, u_rows, u_cols, dpi=dpi,
                         nominal_pitch_mm=nominal_pitch, pick_vec=None,
                         measured_pitch_mm=mp)
                     status_extra = tr("main.grid_built_from_auto_fit")
                 msg_extra = status_extra + ("；" + report.message if report.ok else "")
             else:
                 self.grid = build_grid_manual_first(
-                    fit, manual_grid, res.rows, res.cols, dpi, nominal_pitch,
+                    fit, manual_grid, u_rows, u_cols, dpi, nominal_pitch,
                     use_manual=True)
                 msg_extra = tr("main.manual_and_auto_agree_grid_built_from_manual_baselin")
         else:
@@ -2364,12 +2511,27 @@ class MainWindow(QMainWindow):
                             self._picked[1][1] - self._picked[0][1])
             _cand, warn = validate_frame_vs_pick(fit, pick_vec)
             mp = float((fit.pitch_x_px + fit.pitch_y_px) / 2.0) * 25.4 / max(1e-6, dpi)
-            self.grid = build_grid_from_frame(fit, res.rows, res.cols,
+            self.grid = build_grid_from_frame(fit, u_rows, u_cols,
                                               dpi=dpi,
                                               nominal_pitch_mm=nominal_pitch,
                                               pick_vec=pick_vec,
                                               measured_pitch_mm=mp)
             msg_extra = warn or tr("main.auto_framing_done")
+        # v4.1：网格间距一律用设计 pitch（检测窗按设计网格铺），
+        # 实测间距只做留痕/展示，不参与建网格（避免"按图像自适应"的自我拟合观感）。
+        try:
+            _mp = float(getattr(self.grid, "measured_pitch_mm", None) or 0.0)
+            if _mp <= 0:
+                _mp = float((fit.pitch_x_px + fit.pitch_y_px) / 2.0) * 25.4 / max(1e-6, dpi)
+            self._measured_pitch_mm = _mp
+            self._array_source = "auto"
+            # 检测窗按实测间距铺（窗口必须跟住实际十字，否则边缘漂移）；
+            # 名义值/显示网格仍用设计 pitch（见 _draw_nominal_grid / nominal_points_mm）
+            _pct = (abs(_mp - nominal_pitch) / nominal_pitch * 100.0) if nominal_pitch > 0 else 0.0
+            self._log(tr("main.array_pitch_check_measured_design_dev",
+                         m="%.3f" % _mp, d="%.3f" % nominal_pitch, p="%.2f" % _pct))
+        except Exception:
+            pass
         # v3.4 wizard consistency: auto-framing builds the grid directly and does not
         # write _picked; explain that in the wizard progress line.
         try:
@@ -2381,6 +2543,7 @@ class MainWindow(QMainWindow):
         s = self.src.scale
         n = len(pts)
         self.view.clear_overlay()
+        self._draw_nominal_grid(pts)
         stride = max(1, math.ceil(n / MAX_OVERLAY_ITEMS)) if n > MAX_OVERLAY_ITEMS else 1
         for i in range(0, n, stride):
             gx, gy = pts[i]
@@ -2397,7 +2560,7 @@ class MainWindow(QMainWindow):
                    pitch=self.grid.pitch_mm, n=len(pts), warn=msg_extra))
         self.lbl_hint.setText(tr("main.grid_generated_auto_framing_rows_cols_measured_pitch",
                                  rows=self.grid.rows, cols=self.grid.cols,
-                                 p=self.grid.measured_pitch_mm, n=len(pts)))
+                                 p=(self._measured_pitch_mm or 0.0), n=len(pts)))
         self._log(tr("main.zh_cd673482", rows=self.grid.rows,
                      cols=self.grid.cols, extra=msg_extra))
         self._refresh_flow()
@@ -2466,7 +2629,10 @@ class MainWindow(QMainWindow):
         self._detect_guard = QTimer(self)
         self._detect_guard.setSingleShot(True)
         self._detect_guard.timeout.connect(self._on_detect_timeout)
-        self._detect_guard.start(8000)
+        # v4.1：首次检测需要解码原始灰度（2.23Gpx 图可达数十秒），8s 必误杀。
+        # 已预热（之前解码过）仍用 8s 兜底；未预热给 30s。
+        _guard_ms = 8000 if getattr(self, "_gray_warm", False) else 30000
+        self._detect_guard.start(_guard_ms)
         _round = int(getattr(self, "_auto_correct_count", 0))
         _suffix = tr("main.detect_auto_round_suffix", n=_round) if _round > 0 else ""
         self._log(tr("main.zh_24023d4a", n=len(pts), w=n_workers) + _suffix)
@@ -2498,6 +2664,7 @@ class MainWindow(QMainWindow):
             self._on_detect_error(tr("main.cross_detection_timed_out_8s_ui_forcibly_restored_an"))
 
     def _on_detect_done(self, results: List[Optional[CrossResult]]):
+        self._gray_warm = True
         # G06: 检测期间换图 -> 旧代次结果丢弃
         if self._is_stale_result(self.sender()):
             self._log(tr("main.stale_async_result_discarded"))
@@ -2709,7 +2876,28 @@ class MainWindow(QMainWindow):
             self._diag[tr("main.zh_ff26e9e0")] = tr("main.zh_2cc3c0e1", v=pred_edge, t=TOL_MM)
             return False
         if auto:
-            pass  # 无人值守自动模式：跳过弹窗直接校正重测
+            # v4.1：不再自动改写网格并多轮重测（避免"用检测结果改网格"的循环）。
+            # 只记录一次建议，用户参数（设计 pitch）保持权威；需要时由用户手动执行。
+            _design = float(self.grid.pitch_mm) if self.grid is not None else 0.0
+            self._grid_correction_suggestion = {
+                "measured_pitch_mm": float(pitch_mm_new),
+                "design_pitch_mm": _design,
+                "design_dev_pct": ((abs(float(pitch_mm_new) - _design) / _design * 100.0)
+                                   if _design > 0 else 0.0),
+                "pitch_dev_pct": float(pct * 100.0),
+                "angle_dev_deg": float(max(ang_x, ang_y)),
+                "origin_dev_mm": float(d_origin_mm),
+                "pred_edge_mm": float(pred_edge),
+            }
+            self._diag[tr("main.zh_2ac41737")] = tr(
+                "main.grid_correction_suggested", mm=pitch_mm_new,
+                pct=pct * 100.0, pred=pred_edge)
+            self._log(tr("main.grid_correction_suggested", mm=pitch_mm_new,
+                         pct=pct * 100.0, pred=pred_edge))
+            self.statusBar().showMessage(tr("main.grid_correction_suggested",
+                                            mm=pitch_mm_new, pct=pct * 100.0,
+                                            pred=pred_edge), 12000)
+            return False
         else:
             ret = QMessageBox.question(
                 self, tr("main.grid_correction"),
@@ -3221,6 +3409,7 @@ class MainWindow(QMainWindow):
         stride = max(1, math.ceil(total / MAX_OVERLAY_ITEMS)) if total > MAX_OVERLAY_ITEMS else 1
         grid_pts = self.grid.points_px()
         self.view.clear_overlay()
+        self._draw_nominal_grid(grid_pts)
         self.view._pick_points = []
         # 序号显示策略：小阵列（<=500 点，如 3×3/5×5/9×9/11×11/17×17）序号始终
         # 可见；大阵列由 ImageView LOD 控制（缩放不够时隐藏序号文本防卡）。
@@ -3908,7 +4097,18 @@ class MainWindow(QMainWindow):
         params = {"DPI": self.sp_dpi.value(), tr("main.array_spec"): f"{self.grid.rows}×{self.grid.cols}",
                   tr("main.pitch_mm"): self.grid.pitch_mm, tr("main.method"): method_name,
                   tr("main.calib_rms_mm"): getattr(self, "calib_rms", ""),
-                  tr("main.numbering_mode"): self._order_mode()}
+                  tr("main.numbering_mode"): self._order_mode(),
+                  # v4.1：阵列来源与间距核对留痕（名义值仍按设计 pitch 生成）
+                  tr("main.array_source_params"): {
+                      "manual": tr("main.manual_3_point_frame"),
+                      "auto": tr("main.auto_framing_done"),
+                      "params": tr("main.grid_built_from_params"),
+                  }.get(getattr(self, "_array_source", ""), "N/A")}
+        _mp = getattr(self, "_measured_pitch_mm", None)
+        if _mp:
+            params[tr("main.measured_pitch_mm")] = f"{float(_mp):.4f}"
+            _dp = abs(float(_mp) - float(self.grid.pitch_mm)) / float(self.grid.pitch_mm) * 100.0                 if float(self.grid.pitch_mm) > 0 else 0.0
+            params[tr("main.pitch_deviation_pct")] = f"{_dp:.3f}"
         # 中心原点坐标（mm，相对图像原点，实测拟合阵列中心）——供振镜校正直接取用
         if center:
             params[tr("main.center_origin_mm")] = f"{center[0]:.4f}, {center[1]:.4f}"
@@ -3978,7 +4178,14 @@ class MainWindow(QMainWindow):
                            "method": self.cb_method.currentIndex(),
                            "use_full": self.chk_full.isChecked(),
                            "include_p1": self.chk_p1.isChecked(),
-                           "order": self._order_mode()}}
+                           "order": self._order_mode(),
+                           # v4.1：阵列可选参数 + 来源（加载后恢复，参数为权威）
+                           "rows": int(self.sp_rows.value()),
+                           "cols": int(self.sp_cols.value()),
+                           "pitch": float(self.sp_pitch.value()),
+                           "dpi": float(self.sp_dpi.value()),
+                           "array_source": getattr(self, "_array_source", ""),
+                           "measured_pitch_mm": getattr(self, "_measured_pitch_mm", None)}}
         try:
             with open(path, "w", encoding="utf-8") as fh:
                 json.dump(data, fh, ensure_ascii=False, indent=2)
@@ -4000,6 +4207,23 @@ class MainWindow(QMainWindow):
             """
             if data.get("grid"):
                 self.grid = GridDefinition.from_dict(data["grid"])
+                # v4.1：恢复阵列可选参数（以工程内参数为准）与来源/实测间距留痕
+                _p = data.get("params", {}) or {}
+                try:
+                    if _p.get("rows"):
+                        self.sp_rows.setValue(int(_p["rows"]))
+                    if _p.get("cols"):
+                        self.sp_cols.setValue(int(_p["cols"]))
+                    if _p.get("pitch"):
+                        self.sp_pitch.setValue(float(_p["pitch"]))
+                    if _p.get("dpi"):
+                        self.sp_dpi.setValue(float(_p["dpi"]))
+                except Exception:
+                    pass
+                self._array_source = str(_p.get("array_source", "") or "")
+                self._measured_pitch_mm = _p.get("measured_pitch_mm")
+                self._manual_grid_snapshot = self.grid
+                self.view.clear_overlay()
                 pts = self.grid.points_px()
                 s = self.src.scale if self.src else 1.0
                 for gx, gy in pts:
