@@ -32,8 +32,15 @@ class GridDefinition:
     # 该开关只把"点选歪基"收成"规范正交基"，不引入任何拟合自由度，也不改动
     # 名义值 / pitch_mm / 网格原点 / 校准 npz。
     orthogonalize: bool = False
+    # v4.2 名义值原点语义：
+    #   "center" = 名义 (0,0) 在阵列几何中心（默认，兼容 v4.0/v4.1 报表）
+    #   "corner" = 名义 (0,0) 在 row0/col0 角点（三点手动"起始点"语义）
+    # 物理 Y 正方向规定为"上"（图像 y 向下，故名义 ty 取负）。
+    origin_kind: str = "center"
 
     def __post_init__(self):
+        if self.origin_kind not in ("center", "corner"):
+            self.origin_kind = "center"
         self._normalize_dirs()
 
     def _normalize_dirs(self):
@@ -157,14 +164,22 @@ class GridDefinition:
         """
         c0 = (self.cols - 1) / 2.0
         r0 = (self.rows - 1) / 2.0
+        corner = self.origin_kind == "corner"
+        # v4.2：名义坐标 = 设计偏移（沿建系轴）× pitch，再按"物理 Y 向上为正"取反。
+        # 这样与轴的实际朝向解耦（阵列斜置/行方向朝上或朝下都自洽），
+        # 且名义值仍只由设计 pitch/行列数/方向轴决定（红线 1：不反推、不用实测间距）。
+        xv = np.asarray(self.x_dir_px, np.float64)
+        yv = np.asarray(self.y_dir_px, np.float64)
         pts: List[Tuple[float, float]] = []
         if include_p1:
             pts.append((0.0, 0.0))
         for r in range(self.rows):
             for c in range(self.cols):
-                # 名义值恒用设计标称 pitch_mm（与建网格实测间距 measured_pitch_mm 无关，禁反推）
-                pts.append(((c - c0) * self.pitch_mm,
-                            (r - r0) * self.pitch_mm))
+                dc = float(c) if corner else (c - c0)
+                dr = float(r) if corner else (r - r0)
+                px = dc * self.pitch_mm * xv[0] + dr * self.pitch_mm * yv[0]
+                py = dc * self.pitch_mm * xv[1] + dr * self.pitch_mm * yv[1]
+                pts.append((float(px), float(-py)))   # 图像 y 向下 → 物理 Y 取反向上为正
         return pts
 
     def rotate_dirs(self, deg_ccw: float) -> None:
@@ -222,6 +237,7 @@ class GridDefinition:
             "x_dir_px": list(self.x_dir_px), "y_dir_px": list(self.y_dir_px),
             "measured_pitch_mm": self.measured_pitch_mm,
             "orthogonalize": bool(self.orthogonalize),
+            "origin_kind": self.origin_kind,
         }
 
     @classmethod

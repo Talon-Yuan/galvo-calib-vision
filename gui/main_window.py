@@ -212,6 +212,12 @@ class DetectorThread(QThread):
         # 配合降采样小图预检 + 原图小窗精测（detect_points_fast 两阶段），
         # 保证每个十字中心都来自原始扫描图像的真实识别，不因 scale 损失精度。
         try:
+            # CORE-01：解码前先发一次进度（心跳），让主线程看门狗按"有进展"续期，
+            # 否则 2.23Gpx 首解码 >30s 会被误判卡死并丢弃结果。
+            try:
+                self.progress.emit(0.005)
+            except Exception:
+                pass
             gray = self.src.original_gray()
             self.results = detect_points_fast(
                 gray, self.points, self.pitch_px, self.params,
@@ -353,6 +359,170 @@ class AutoFrameThread(QThread):
         if r0 is not None and r0.ok:
             return (float(r0.x), float(r0.y))
         return None
+
+
+PICK_MODES = ("center1", "corner1", "center2", "three")
+PICK_MODE_LABELS = {
+    "center1": "main.pick_mode_center1",
+    "corner1": "main.pick_mode_corner1",
+    "center2": "main.pick_mode_center2",
+    "three": "main.pick_mode_three",
+}
+_PICK_SLOTS = {"center1": 1, "corner1": 1, "center2": 2, "three": 3}
+
+
+class CenterProbeThread(QThread):
+    """v4.2 辅助建系：用户点一下 → 原始灰度局部扫描 → 精测中心/方向。
+
+    红线：线程内禁止碰 UI；只做几何测量，不写名义值、不改 pitch。
+    `done` 载荷 dict: ok, center_px, x_dir, y_dir, neighbors, measured_pitch_mm,
+    fallback_used, even_warning, message。
+    """
+    done = pyqtSignal(object)
+
+    def __init__(self, src, hint_px, mode, rows, cols, pitch_mm, dpi,
+                 params, second_px=None, parent=None):
+        super().__init__(parent)
+        self.src = src
+        self.hint_px = (float(hint_px[0]), float(hint_px[1]))
+        self.mode = str(mode)
+        self.rows = int(rows)
+        self.cols = int(cols)
+        self.pitch_mm = float(pitch_mm)
+        self.dpi = float(dpi)
+        self.params = params
+        self.second_px = None if second_px is None else (float(second_px[0]), float(second_px[1]))
+
+    @staticmethod
+    def _norm(v):
+        nx = math.hypot(v[0], v[1])
+        if nx <= 1e-12:
+            return None
+        return (v[0] / nx, v[1] / nx)
+
+    def run(self):
+        try:
+            res = {"ok": False, "center_px": None, "x_dir": (1.0, 0.0),
+                   "y_dir": (0.0, -1.0), "neighbors": 0,
+                   "measured_pitch_mm": None, "fallback_used": True,
+                   "even_warning": False, "message": ""}
+            pitch_px = self.pitch_mm * self.dpi / 25.4
+            if pitch_px <= 1e-6:
+                self.done.emit(res)
+                return
+            gray = self.src.original_gray()
+            p = self.params
+            # 1) 精测锚点：窗口三级放大
+            anchor = None
+            for frac in (0.25, 0.5, 0.75):
+                win = int(max(81, min(1200, pitch_px * frac)))
+                anchor = refine_manual_point(gray, self.hint_px[0], self.hint_px[1], p, win=win)
+                if anchor is not None:
+                    break
+            if anchor is None:
+                res["message"] = "not_found"
+                self.done.emit(res)
+                return
+            ax, ay = float(anchor[0]), float(anchor[1])
+            # v4.2：远点保护①——精测锚点离点击处超过 1×间距，说明点击处本就没有十字
+            if math.hypot(ax - self.hint_px[0], ay - self.hint_px[1]) > 1.0 * pitch_px:
+                res["message"] = "not_found"
+                self.done.emit(res)
+                return
+            # 2) 四邻域探测（用设计 pitch 作为搜索步长）
+            probe = np.array([[ax - pitch_px, ay], [ax + pitch_px, ay],
+                              [ax, ay - pitch_px], [ax, ay + pitch_px]], np.float64)
+            rs = detect_points(gray, probe, pitch_px, p)
+            got = [None if r is None or not r.ok else (float(r.x), float(r.y)) for r in rs]
+            left, right, up, down = got[0], got[1], got[2], got[3]
+            res["neighbors"] = sum(1 for g in got if g is not None)
+            # v4.2：远点保护②——单点模式至少要有 2 个邻居（角点 2 个/中心 4 个），
+            # 只有 1 个邻居无法确认行列方向与间距，按"附近未找到十字"处理。
+            if self.second_px is None and res["neighbors"] < 2:
+                res["message"] = "not_found"
+                self.done.emit(res)
+                return
+            # 方向向量：优先用"邻居对"；只有单侧邻居时用"邻居−锚点"（角点场景：
+            # 角点只可能有一侧邻居，这正是行/列方向本身）。
+            def _vec(a, b):
+                if a is None or b is None:
+                    return None
+                return (b[0] - a[0], b[1] - a[1])
+            xv = _vec(left, right) if (left and right) else _vec((ax, ay), right)
+            if xv is None:
+                xv = _vec(left, (ax, ay))   # 只有左侧邻居：方向取反
+            yv = _vec(up, down) if (up and down) else _vec((ax, ay), down)
+            if yv is None:
+                yv = _vec(up, (ax, ay))     # 只有上侧邻居：行方向朝上
+            # 投影分量：以锚点为中心，沿 X/Y 方向
+            def _proj(pt, vec, origin=(ax, ay)):
+                if pt is None or vec is None:
+                    return None
+                return (pt[0] - origin[0]) * vec[0] + (pt[1] - origin[1]) * vec[1]
+            # 3) 方向：单点模式优先邻域；两点模式优先第二点
+            if self.second_px is not None:
+                xv2 = (self.second_px[0] - self.hint_px[0], self.second_px[1] - self.hint_px[1])
+                if self._norm(xv2):
+                    xv = xv2
+            xu = self._norm(xv) if xv else None
+            if xu is None:
+                # 远点点击保护：既无 X 向邻居、也没有用户第二点 → 判"附近无十字"，不建系
+                if self.second_px is None:
+                    res["message"] = "not_found"
+                    self.done.emit(res)
+                    return
+                xu = (1.0, 0.0)
+                res["fallback_used"] = True
+                res["message"] = "neighbor_fallback"
+            yu_raw = self._norm(yv) if yv else None
+            # X 朝向图像右方（列号向右增）；Y 保留探测/点选得到的行方向（不强行翻转）
+            if xu[0] < 0:
+                xu = (-xu[0], -xu[1])
+            xu = self._norm(xu) or (1.0, 0.0)
+            if yu_raw is None:
+                yu_raw = (-xu[1], xu[0]) if abs(xu[1]) > 1e-9 else (0.0, 1.0)
+            # 让 Y 与 X 正交：保留 yu_raw 的符号（行方向由它决定）
+            dot = yu_raw[0] * xu[0] + yu_raw[1] * xu[1]
+            yu = (yu_raw[0] - dot * xu[0], yu_raw[1] - dot * xu[1])
+            yu = self._norm(yu) or ((0.0, 1.0) if xu[0] >= 0 else (0.0, -1.0))
+            if abs(yu[0] * xu[0] + yu[1] * xu[1]) > 0.5:
+                yu = (-xu[1], xu[0])
+            res["x_dir"], res["y_dir"] = xu, yu
+            # 4) 实测间距（邻居对平均）
+            ds = []
+            if left and right:
+                ds.append(math.hypot(right[0] - left[0], right[1] - left[1]) / 2.0)
+            if up and down:
+                ds.append(math.hypot(down[0] - up[0], down[1] - up[1]) / 2.0)
+            if ds:
+                res["measured_pitch_mm"] = float(sum(ds) / len(ds)) * 25.4 / self.dpi
+            # 5) 中心：奇奇=锚点；偶维=邻居中点；不足则 ±半格 + 告警
+            cx, cy = ax, ay
+            half_c, half_r = (self.cols - 1) / 2.0, (self.rows - 1) / 2.0
+            even_warn = False
+            if self.mode in ("center1", "center2"):
+                if self.cols % 2 == 0:
+                    if left and right:
+                        cx = (left[0] + right[0]) / 2.0
+                    else:
+                        cx = ax + 0.5 * pitch_px * xu[0]
+                        even_warn = True
+                if self.rows % 2 == 0:
+                    if up and down:
+                        cy = (up[1] + down[1]) / 2.0
+                    else:
+                        cy = ay + 0.5 * pitch_px * yu[1]
+                        even_warn = True
+            else:
+                # 角点模式：锚点即角点，直接返回（调用方以 origin_kind="corner" 建系）
+                cx, cy = ax, ay
+            res.update({"ok": True, "center_px": (float(cx), float(cy)),
+                        "even_warning": bool(even_warn)})
+            self.done.emit(res)
+        except Exception:
+            import traceback
+            self.done.emit({"ok": False, "center_px": None,
+                            "message": "error: " + traceback.format_exc()})
 
 
 class MainWindow(QMainWindow):
@@ -1022,6 +1192,16 @@ class MainWindow(QMainWindow):
         btn_auto_frame.setToolTip(tr("main.auto_detect_all_inner_corners_and_least_squares_fit_"))
         btn_auto_frame.clicked.connect(self._on_auto_frame)
         v3.addWidget(self.lbl_hint)
+        # v4.2：点选模式（单点中心=推荐；默认单点，可用下拉切回三点传统）
+        _pm = QHBoxLayout()
+        _pm.setSpacing(6)
+        _pm.addWidget(QLabel(tr("main.pick_mode")))
+        self.cb_pick_mode = QComboBox()
+        for _k in PICK_MODES:
+            self.cb_pick_mode.addItem(tr(PICK_MODE_LABELS[_k]))
+        self.cb_pick_mode.currentIndexChanged.connect(self._on_pick_mode_changed)
+        _pm.addWidget(self.cb_pick_mode, 1)
+        v3.addLayout(_pm)
         self.btn_pick_next.setObjectName("btnPick")
         v3.addWidget(self.btn_pick_next)
         hl = QHBoxLayout()
@@ -1052,7 +1232,8 @@ class MainWindow(QMainWindow):
         # 而非设备/样件的方形度误差。本开关只把"点选歪基"收成"规范正交基"，
         # 不引入任何拟合自由度，也不改动 pitch_mm / 名义值 / 网格原点 / 校准 npz。
         self.chk_ortho = QCheckBox(tr("main.frame_orthogonalization_recommended_force_axes_perpe"))
-        self.chk_ortho.setChecked(True)
+        # v4.2：默认关闭。对称收拢属 3DOF 边界（红线 5），需用户显式勾选。
+        self.chk_ortho.setChecked(False)
         self.chk_ortho.setToolTip(tr(
             "main.checked_collapse_the_angle_between_the_two_picked_au"))
         v3.addWidget(self.chk_ortho)
@@ -2126,17 +2307,57 @@ class MainWindow(QMainWindow):
         else:
             self.lbl_hint.setText(tr("main.undo_last_point_hint"))
 
-    def _update_pick_ui(self):
-        """按当前已选点刷新主按钮文案 / 删除按钮可用性 / 进度文案。"""
+    def _pick_mode(self) -> str:
+        """当前点选模式（center1/corner1/center2/three）。"""
         try:
+            idx = int(getattr(self, "cb_pick_mode").currentIndex())
+            if 0 <= idx < len(PICK_MODES):
+                return PICK_MODES[idx]
+        except Exception:
+            pass
+        return "three"
+
+    def _pick_mode_labels(self):
+        """当前模式下各槽位的提示键。"""
+        mode = self._pick_mode()
+        if mode == "center1":
+            return ("main.pick_center_prompt",)
+        if mode == "corner1":
+            return ("main.pick_corner_prompt",)
+        if mode == "center2":
+            return ("main.pick_center_prompt", "main.pick_center_x_prompt")
+        return ("main.pick_origin", "main.pick_x_direction_point", "main.pick_y_direction_point")
+
+    def _on_pick_mode_changed(self, idx: int):
+        """切换点选模式：清空已点选（槽位语义变了），更新提示与按钮文案。"""
+        mode = self._pick_mode()
+        try:
+            self._reset_pick()
+        except Exception:
+            pass
+        self._log(tr("main.pick_mode_changed", mode=tr(PICK_MODE_LABELS.get(mode, "main.pick_mode_three"))))
+        self._update_pick_ui()
+        labels = self._pick_mode_labels()
+        if labels:
+            self.lbl_hint.setText(tr(labels[0]))
+
+    def _update_pick_ui(self):
+        """按当前模式与已选点刷新主按钮文案 / 删除按钮可用性 / 进度文案。"""
+        try:
+            mode = self._pick_mode()
+            slots = _PICK_SLOTS.get(mode, 3)
             picked = getattr(self, "_picked", None) or [None, None, None]
-            n = sum(1 for p in picked if p is not None)
-            nxt = next((i for i in range(3) if picked[i] is None), None)
+            n = sum(1 for p in picked[:slots] if p is not None)
+            nxt = next((i for i in range(slots) if picked[i] is None), None)
             if getattr(self, "btn_pick_next", None) is None:
                 return
-            self.btn_pick_next.setText(tr(self._PICK_LABELS[nxt] if nxt is not None else "main.repick_from_origin"))
+            labels = self._pick_mode_labels()
+            if nxt is not None and nxt < len(labels):
+                self.btn_pick_next.setText(tr(labels[nxt]))
+            else:
+                self.btn_pick_next.setText(tr("main.repick_from_origin"))
             self.btn_pick_undo.setEnabled(n > 0)
-            self.lbl_pick_progress.setText(tr("main.picked_n_of_3", n=n))
+            self.lbl_pick_progress.setText(tr("main.picked_n_of_n", n=n, m=slots))
         except Exception:
             pass
 
@@ -2147,8 +2368,9 @@ class MainWindow(QMainWindow):
             return
         self._pick_state = slot
         self.view.set_mode(MODE_PICK)
-        if slot == 0:
-            self.lbl_hint.setText(tr("main.click_the_array_origin_center_of_the_1st_cross"))
+        labels = self._pick_mode_labels()
+        if slot < len(labels):
+            self.lbl_hint.setText(tr(labels[slot]))
         elif slot == 1:
             self.lbl_hint.setText(tr("main.click_the_2nd_cross_along_x_direction"))
         else:
@@ -2185,9 +2407,16 @@ class MainWindow(QMainWindow):
         self._pick_state = -1
         self.view.set_mode(MODE_NONE)
         self._refresh_pick_marks()
-        if all(p is not None for p in self._picked):
+        mode = self._pick_mode()
+        slots = _PICK_SLOTS.get(mode, 3)
+        if all(self._picked[i] is not None for i in range(slots)):
             self._update_pick_ui()
-            self._finish_pick()
+            if mode in ("center1", "corner1"):
+                self._start_center_probe(mode)
+            elif mode == "center2":
+                self._start_center_probe(mode, second_px=self._picked[1])
+            else:
+                self._finish_pick()
         else:
             # 向导：点完自动跳到下一个空缺槽位，用户无需再点按钮
             nxt = next((i for i in range(3) if self._picked[i] is None), None)
@@ -2248,6 +2477,7 @@ class MainWindow(QMainWindow):
                 tr("main.abnormal_picked_axis_angle_g_3f_frame_orthogonalizat", g=before), 8000)
             return g
         self._ortho_rejected = False
+        g.orthogonalize = True   # CORE-04：只有"接受"才置位，存盘/加载才有据可查
         x2, y2, corr = GridDefinition.orthonormalize(g.x_dir_px, g.y_dir_px)
         if abs(corr) > 1e-9:
             g.x_dir_px = tuple(float(v) for v in x2)
@@ -2298,7 +2528,9 @@ class MainWindow(QMainWindow):
         y = (self._picked[2][0] - o[0], self._picked[2][1] - o[1])
         self.grid = GridDefinition(rows=self.sp_rows.value(), cols=self.sp_cols.value(),
                                    pitch_mm=self.sp_pitch.value(), dpi=self.sp_dpi.value(),
-                                   origin_px=o, x_dir_px=x, y_dir_px=y)
+                                   origin_px=o, x_dir_px=x, y_dir_px=y,
+                                   origin_kind="corner")
+        self._canonicalize_axes(self.grid, "corner", "三点手动建系")
         # B1：手点三点的两轴夹角无正交约束，按开关收拢为正交基（先建后修，便于留痕原夹角）
         self._apply_ortho(self.grid, tr("main.manual_3_point_frame"))
         # 手动基准快照：供自动建系手动优先（G1/G2/G5）对比与克隆基准使用
@@ -2326,6 +2558,145 @@ class MainWindow(QMainWindow):
                      pitch=self.grid.pitch_mm, n=len(pts)))
         self._refresh_flow()
 
+    def _canonicalize_axes(self, g, origin_kind: str, why: str = ""):
+        """v4.2：规范坐标轴——X+ 向右；Y 轴按图像"向下"存储（行号自然向下增）。
+
+        物理 Y+（向上）在上报端取反实现（见 `_judge_ab`），这样
+        `nominal_points_mm()` 的 ty=-Δrow·pitch 与轴方向自洽，行号仍是"第 1 行在最上面"。
+        只翻方向，不动 origin / pitch / measured。
+        """
+        if g is None:
+            return g
+        x = np.asarray(g.x_dir_px, np.float64)
+        y = np.asarray(g.y_dir_px, np.float64)
+        nx, ny = float(np.linalg.norm(x)), float(np.linalg.norm(y))
+        x = x / nx if nx > 1e-9 else np.array([1.0, 0.0])
+        y = y / ny if ny > 1e-9 else np.array([0.0, 1.0])
+        if x[0] < 0:
+            x = -x          # +X 恒朝右（列号向右增）
+        # v4.2：Y 方向**不强行翻转**——它代表"行号递增方向"（用户点选/探测得到），
+        # 物理 Y+ 向上由上报端 `_judge_ab` 统一取反实现（名义值也按轴投影后再取反）。
+        g.x_dir_px = (float(x[0]), float(x[1]))
+        g.y_dir_px = (float(y[0]), float(y[1]))
+        g.origin_kind = origin_kind if origin_kind in ("center", "corner") else "center"
+        return g
+
+    def _grid_center_px(self, g=None):
+        """阵列几何中心像素（按设计 pitch/方向推算，不用检测结果）。"""
+        g = self.grid if g is None else g
+        if g is None:
+            return None
+        ppx = float(g.pitch_mm) * float(g.dpi) / 25.4
+        x = np.asarray(g.x_dir_px, np.float64)
+        y = np.asarray(g.y_dir_px, np.float64)
+        hc = (int(g.cols) - 1) / 2.0
+        hr = (int(g.rows) - 1) / 2.0
+        return (float(g.origin_px[0]) + hc * ppx * x[0] + hr * ppx * y[0],
+                float(g.origin_px[1]) + hc * ppx * x[1] + hr * ppx * y[1])
+
+    def _make_grid_from_center(self, center_px, x_dir, y_dir, origin_kind="center"):
+        """唯一建系换算入口：center_px 语义由 origin_kind 决定（center=阵列中心 / corner=角点）。
+
+        返回 GridDefinition（成功）或 None（失败）；调用方用 `if not ...` 判断。
+        """
+        if self.src is None:
+            return None
+        rows = int(self.sp_rows.value())
+        cols = int(self.sp_cols.value())
+        pitch_mm = float(self.sp_pitch.value())
+        dpi = float(self.sp_dpi.value())
+        ppx = pitch_mm * dpi / 25.4
+        xu = CenterProbeThread._norm(x_dir) or (1.0, 0.0)
+        yu = CenterProbeThread._norm(y_dir) or (-xu[1], xu[0])
+        if origin_kind == "corner":
+            ox, oy = float(center_px[0]), float(center_px[1])
+        else:
+            hc = (cols - 1) / 2.0
+            hr = (rows - 1) / 2.0
+            ox = float(center_px[0]) - hc * ppx * xu[0] - hr * ppx * yu[0]
+            oy = float(center_px[1]) - hc * ppx * xu[1] - hr * ppx * yu[1]
+        g = GridDefinition(rows=rows, cols=cols, pitch_mm=pitch_mm, dpi=dpi,
+                           origin_px=(ox, oy),
+                           x_dir_px=(float(xu[0]), float(xu[1])),
+                           y_dir_px=(float(yu[0]), float(yu[1])),
+                           origin_kind=origin_kind)
+        self._canonicalize_axes(g, origin_kind)
+        self.grid = g
+        self._apply_ortho(g, tr("main.grid_built_from_params"))
+        self._manual_grid_snapshot = g
+        return g
+
+    def _start_center_probe(self, mode: str, second_px=None):
+        """v4.2：启动"点一下 → 扫描精测中心"后台线程。"""
+        if self.src is None:
+            QMessageBox.information(self, tr("common.info"), tr("main.please_import_a_scan_image_first"))
+            return
+        if getattr(self, "_center_probe", None) is not None and self._center_probe.isRunning():
+            return
+        self._center_probe = CenterProbeThread(
+            self.src, self._picked[0], mode,
+            int(self.sp_rows.value()), int(self.sp_cols.value()),
+            float(self.sp_pitch.value()), float(self.sp_dpi.value()),
+            self._current_params(), second_px=second_px, parent=self)
+        self._center_probe._gen = getattr(self, "_src_gen", 0)
+        self._center_probe.done.connect(self._on_center_probe_done)
+        self._center_probe.finished.connect(self._on_center_probe_finished)
+        self.btn_pick_next.setEnabled(False)
+        self.statusBar().showMessage(tr("main.center_probe_running"))
+        self._log(tr("main.center_probe_running"))
+        self._center_probe.start()
+
+    def _on_center_probe_finished(self):
+        try:
+            self.btn_pick_next.setEnabled(True)
+        except Exception:
+            pass
+
+    def _on_center_probe_done(self, payload):
+        if self._is_stale_result(self.sender()):
+            self._log(tr("main.stale_async_result_discarded"))
+            return
+        if not isinstance(payload, dict):
+            self._log(tr("main.center_probe_failed", err=str(payload)))
+            return
+        if not payload.get("ok"):
+            msg = str(payload.get("message") or "")
+            if msg == "not_found":
+                self._log(tr("main.center_probe_not_found"))
+                self.statusBar().showMessage(tr("main.center_probe_not_found"), 12000)
+            else:
+                self._log(tr("main.center_probe_failed", err=msg))
+                self.statusBar().showMessage(
+                    tr("main.center_probe_failed", err=msg.splitlines()[-1][:80]), 12000)
+            return
+        mode = self._pick_mode()
+        origin_kind = "corner" if mode == "corner1" else "center"
+        center = payload.get("center_px")
+        xdir = payload.get("x_dir") or (1.0, 0.0)
+        ydir = payload.get("y_dir") or (0.0, -1.0)
+        if not self._make_grid_from_center(center, xdir, ydir, origin_kind):
+            return
+        self.origin_xy = (float(center[0]), float(center[1]))
+        self._measured_pitch_mm = payload.get("measured_pitch_mm")
+        self._array_source = "center_probe"
+        self._gray_warm = True
+        self._auto_snapshot = None
+        self._manual_active = False
+        self._redraw_marks()
+        ang = math.degrees(math.atan2(float(xdir[1]), float(xdir[0])))
+        mp = payload.get("measured_pitch_mm")
+        self._log(tr("main.center_probe_ok", cx=float(center[0]), cy=float(center[1]),
+                     ang=ang, n=int(payload.get("neighbors") or 0),
+                     mp=("N/A" if mp is None else "%.3fmm" % float(mp))))
+        if payload.get("fallback_used"):
+            self._log(tr("main.center_probe_neighbor_fallback"))
+            self.statusBar().showMessage(tr("main.center_probe_neighbor_fallback"), 12000)
+        if payload.get("even_warning"):
+            self._log(tr("main.center_probe_even_warning"))
+        self._update_pick_ui()
+        self._refresh_flow()
+        self._update_summary()
+
     def _on_apply_next(self):
         """「应用阵列（下一步）」：没有网格时，允许"按参数铺网格"（跳过建系）。
 
@@ -2345,60 +2716,48 @@ class MainWindow(QMainWindow):
         self._refresh_flow()
 
     def _build_grid_from_params(self) -> bool:
-        """按用户参数（行列/间距/DPI）铺设计网格；方向取图像轴或已点方向点。"""
+        """按用户参数（行列/间距/DPI）铺设计网格；方向取图像轴或已点方向点。
+
+        v4.2：统一走 _make_grid_from_center；"中心/角点"语义显式传入。
+        """
         src = self.src
         if src is None:
             return False
-        u_rows = int(self.sp_rows.value())
-        u_cols = int(self.sp_cols.value())
-        o = self._picked[0]
-        is_center = o is None
-        if is_center:
-            # 优先用自动建系精测出的阵列中心（B3 origin_xy），避免图像中心偏置
+        mode = self._pick_mode()
+        has_origin = self._picked[0] is not None
+        is_center = (mode == "center1") or (not has_origin)
+        if has_origin and mode in ("corner1", "three"):
+            center = self._picked[0]
+            origin_kind = "corner"
+        else:
             ox = getattr(self, "origin_xy", None)
             if isinstance(ox, (tuple, list)) and len(ox) == 2:
-                o = (float(ox[0]), float(ox[1]))
+                center = (float(ox[0]), float(ox[1]))
+                self._log(tr("main.grid_built_from_params_array_center"))
+            elif has_origin:
+                center = self._picked[0]
                 self._log(tr("main.grid_built_from_params_array_center"))
             else:
-                o = (src.origin_w / 2.0, src.origin_h / 2.0)
+                center = (src.origin_w / 2.0, src.origin_h / 2.0)
                 self._log(tr("main.grid_built_from_params_image_center"))
-        x = None
+            origin_kind = "center"
+        x = y = None
         if self._picked[1] is not None and self._picked[0] is not None:
-            x = (self._picked[1][0] - self._picked[0][0],
-                 self._picked[1][1] - self._picked[0][1])
-        y = None
+            x = (self._picked[1][0] - self._picked[0][0], self._picked[1][1] - self._picked[0][1])
         if self._picked[2] is not None and self._picked[0] is not None:
-            y = (self._picked[2][0] - self._picked[0][0],
-                 self._picked[2][1] - self._picked[0][1])
+            y = (self._picked[2][0] - self._picked[0][0], self._picked[2][1] - self._picked[0][1])
         if x is None:
             x = (1.0, 0.0)
         if y is None:
             y = (-x[1], x[0])
-        # CORE-03：GridDefinition.origin_px 是 row0col0 角点；若手里是"阵列中心"，
-        # 必须减 (n-1)/2 个设计间距换算成角点，否则整块网格偏移半幅。
-        if is_center:
-            _ppx = float(self.sp_pitch.value()) * float(self.sp_dpi.value()) / 25.4
-            _nx = (max(1.0, float(x[0])) ** 2 + float(x[1]) ** 2) ** 0.5
-            _ny = (float(y[0]) ** 2 + float(y[1]) ** 2) ** 0.5
-            _xu = (float(x[0]) / _nx, float(x[1]) / _nx)
-            _yu = (float(y[0]) / _ny, float(y[1]) / _ny)
-            _hc = (u_cols - 1) / 2.0
-            _hr = (u_rows - 1) / 2.0
-            o = (float(o[0]) - _hc * _ppx * _xu[0] - _hr * _ppx * _yu[0],
-                 float(o[1]) - _hc * _ppx * _xu[1] - _hr * _ppx * _yu[1])
-        self.grid = GridDefinition(rows=u_rows, cols=u_cols,
-                                   pitch_mm=float(self.sp_pitch.value()),
-                                   dpi=float(self.sp_dpi.value()),
-                                   origin_px=(float(o[0]), float(o[1])),
-                                   x_dir_px=(float(x[0]), float(x[1])),
-                                   y_dir_px=(float(y[0]), float(y[1])))
-        self._apply_ortho(self.grid, tr("main.grid_built_from_params"))
+        if not self._make_grid_from_center(center, x, y, origin_kind):
+            return False
         self._array_source = "params"
         self._measured_pitch_mm = None
-        self._manual_grid_snapshot = self.grid
         self._redraw_marks()
         self._log(tr("main.grid_built_from_params_rows_cols_pitch",
-                     r=u_rows, c=u_cols, p="%.3f" % float(self.sp_pitch.value())))
+                     r=self.grid.rows, c=self.grid.cols,
+                     p="%.3f" % float(self.grid.pitch_mm)))
         self.statusBar().showMessage(tr("main.grid_built_from_params"))
         return True
 
@@ -2557,6 +2916,11 @@ class MainWindow(QMainWindow):
                                               pick_vec=pick_vec,
                                               measured_pitch_mm=mp)
             msg_extra = warn or tr("main.auto_framing_done")
+        # v4.2：自动建系语义=阵列中心；轴方向规范化为"右/上为正"
+        try:
+            self._canonicalize_axes(self.grid, "center", "自动建系")
+        except Exception:
+            pass
         # v4.1：网格间距一律用设计 pitch（检测窗按设计网格铺），
         # 实测间距只做留痕/展示，不参与建网格（避免"按图像自适应"的自我拟合观感）。
         try:
@@ -2716,7 +3080,17 @@ class MainWindow(QMainWindow):
                 th.error.disconnect(self._on_detect_error)
             except Exception:
                 pass
-            self._on_detect_error(tr("main.cross_detection_timed_out_8s_ui_forcibly_restored_an"))
+            # CORE-01：真卡死的线程要终止并回收，避免"幽灵线程"继续吃 CPU/内存
+            try:
+                th.requestInterruption()
+            except Exception:
+                pass
+            try:
+                th.terminate()
+                th.wait(2000)
+            except Exception:
+                pass
+            self._on_detect_error(tr("main.cross_detection_timed_out_ui_forcibly_restored"))
 
     def _on_detect_done(self, results: List[Optional[CrossResult]]):
         # G06: 检测期间换图 -> 旧代次结果丢弃（先判代次，再置预热标记，避免旧结果污染新图）
@@ -3005,6 +3379,43 @@ class MainWindow(QMainWindow):
             out.append((rx / n, ry / n))
         return out[0], out[1]
 
+    def _judge_origin_px(self):
+        """判定原点像素：角点模式=grid.origin_px；中心模式=精测中心或模型中心。"""
+        g = self.grid
+        if g is None:
+            return None
+        if getattr(g, "origin_kind", "center") == "corner":
+            return (float(g.origin_px[0]), float(g.origin_px[1]))
+        ox = getattr(self, "origin_xy", None)
+        if isinstance(ox, (tuple, list)) and len(ox) == 2:
+            return (float(ox[0]), float(ox[1]))
+        return self._grid_center_px(g)
+
+    def _judge_origin_mm(self):
+        """判定原点物理坐标（mm）：只作平移基准，不做"拟合中心归零"。"""
+        p = self._judge_origin_px()
+        if p is None:
+            return None
+        try:
+            return self._to_mm(float(p[0]), float(p[1]))
+        except Exception:
+            return None
+
+    def _judge_ab(self, r):
+        """v4.2 判定链：实测 mm − 判定原点 → to_phys（X 右为正 / Y 上为正）。"""
+        if r is None or not getattr(r, "ok", False):
+            return None
+        try:
+            mm = self._to_mm(float(r.x), float(r.y))
+        except Exception:
+            return None
+        o = self._judge_origin_mm()
+        if o is not None:
+            mm = (mm[0] - o[0], mm[1] - o[1])
+        # v4.2：标定输出的 mm 已是图像轴（x 右 / y 下）；物理系要求 Y 向上 → 取反。
+        # 名义值也按"设计偏移沿轴投影后再取反"生成，二者同系可直接比较。
+        return (float(mm[0]), -float(mm[1]))
+
     def _table_rms_mm(self) -> Optional[float]:
         """按当前 grid 方向轴计算表格合成 RMS（mm），计算口径与导出表格完全一致
         （实测中心归零 → grid.to_phys 投影 → 与固定名义值比较）。"""
@@ -3013,15 +3424,14 @@ class MainWindow(QMainWindow):
         nominal = self._nominal_mm_list()
         if not nominal:
             return None
-        center = self._center_measured_mm(self.results)
         sq = []
         for i, r in enumerate(self.results):
             if r is None or not r.ok or i >= len(nominal):
                 continue
-            mm_x, mm_y = self._to_mm(r.x, r.y)
-            if center:
-                mm_x, mm_y = mm_x - center[0], mm_y - center[1]
-            a, b = self.grid.to_phys(mm_x, mm_y)
+            ab = self._judge_ab(r)
+            if ab is None:
+                continue
+            a, b = ab
             tx, ty = nominal[i]
             sq.append((a - tx) ** 2 + (b - ty) ** 2)
         if not sq:
@@ -3572,15 +3982,12 @@ class MainWindow(QMainWindow):
     def _row_values(self, i: int, r, nominal, center) -> list:
         """构造结果表第 i 行的 14 个显示值（全量刷新与单行更新共用）。"""
         ox_, oy_ = r.x, r.y  # 检测结果已是原始分辨率坐标
-        mm_x, mm_y = self._to_mm(ox_, oy_)
-        # 实测值中心归零后投影到点选方向轴，与固定名义值同坐标系
-        # （名义值固定为行列设计坐标，反向点选时仅实测按方向投影，见 grid.to_phys）
-        if center:
-            mm_xc, mm_yc = mm_x - center[0], mm_y - center[1]
+        # v4.2 判定链：实测 mm − 判定原点（不吸收平移）→ to_phys（右/上为正）
+        ab = self._judge_ab(r)
+        if ab is None:
+            mm_xc, mm_yc = float("nan"), float("nan")
         else:
-            mm_xc, mm_yc = mm_x, mm_y
-        if self.grid is not None:
-            mm_xc, mm_yc = self.grid.to_phys(mm_xc, mm_yc)
+            mm_xc, mm_yc = float(ab[0]), float(ab[1])
         if nominal and i < len(nominal):
             tx, ty = nominal[i]
             dx, dy = mm_xc - tx, mm_yc - ty
@@ -3646,11 +4053,10 @@ class MainWindow(QMainWindow):
         if r is not None and not r.ok:
             # 低置信：有检测坐标（原始分辨率），实测列给实际值，状态 DETECT_FAIL(低置信)
             try:
-                mm_x, mm_y = self._to_mm(r.x, r.y)
-                if self._center_cache:
-                    mm_x, mm_y = mm_x - self._center_cache[0], mm_y - self._center_cache[1]
-                if self.grid is not None:
-                    mm_x, mm_y = self.grid.to_phys(mm_x, mm_y)
+                ab = self._judge_ab(r)
+                if ab is None:
+                    raise ValueError("judge failed")
+                mm_x, mm_y = float(ab[0]), float(ab[1])
                 msx, msy = f"{mm_x:.4f}", f"{mm_y:.4f}"
             except Exception:
                 msx = msy = "--"
@@ -3715,16 +4121,20 @@ class MainWindow(QMainWindow):
         """
         if self.grid is None:
             return None
-        theo = self._theory_mm_list()
-        if not theo:
+        g = self.grid
+        # CORE-05：几何中心 = 角点 + ((n-1)/2)·pitch·方向（连续值）。
+        # 偶数阵列中心落在两十字之间，不能用离散下标 round 取点（4×4/6×6 会偏半格）。
+        ppx = float(g.pitch_mm) * float(g.dpi) / 25.4
+        x = np.asarray(g.x_dir_px, np.float64)
+        y = np.asarray(g.y_dir_px, np.float64)
+        hc = (int(g.cols) - 1) / 2.0
+        hr = (int(g.rows) - 1) / 2.0
+        cx = float(g.origin_px[0]) + hc * ppx * x[0] + hr * ppx * y[0]
+        cy = float(g.origin_px[1]) + hc * ppx * x[1] + hr * ppx * y[1]
+        try:
+            return self._to_mm(cx, cy)
+        except Exception:
             return None
-        r, c = self.grid.rows, self.grid.cols
-        # CORE-05：几何中心取 (n-1)/2（与 nominal_points_mm / _center_measured_mm 同口径），
-        # 避免偶数阵列落到 r//2 的半格位置
-        cidx = int(round((r - 1) / 2.0)) * c + int(round((c - 1) / 2.0))
-        if cidx < len(theo):
-            return theo[cidx]
-        return theo[len(theo) // 2] if theo else None
 
     def _center_measured_mm(self, results: List[Optional[CrossResult]]) -> Optional[Tuple[float, float]]:
         """实测拟合阵列中心（mm），用作中心归零基准。
@@ -4131,14 +4541,11 @@ class MainWindow(QMainWindow):
                              "conf": None, "status": "DETECT_FAIL"})
                 continue
             ox_, oy_ = r.x, r.y  # 原始分辨率坐标
-            mm_x, mm_y = self._to_mm(ox_, oy_)
-            # 实测值中心归零后投影到点选方向轴，与固定名义值同坐标系
-            if center:
-                mm_xc, mm_yc = mm_x - center[0], mm_y - center[1]
+            ab = self._judge_ab(r)
+            if ab is None:
+                mm_xc, mm_yc = float("nan"), float("nan")
             else:
-                mm_xc, mm_yc = mm_x, mm_y
-            if self.grid is not None:
-                mm_xc, mm_yc = self.grid.to_phys(mm_xc, mm_yc)
+                mm_xc, mm_yc = float(ab[0]), float(ab[1])
             if nominal and i < len(nominal):
                 tx, ty = nominal[i]
                 dx, dy = mm_xc - tx, mm_yc - ty
@@ -4162,7 +4569,13 @@ class MainWindow(QMainWindow):
                       "manual": tr("main.manual_3_point_frame"),
                       "auto": tr("main.auto_framing_done"),
                       "params": tr("main.grid_built_from_params"),
-                  }.get(getattr(self, "_array_source", ""), "N/A")}
+                      "center_probe": tr("main.array_source_center_probe"),
+                  }.get(getattr(self, "_array_source", ""), "N/A"),
+                  # v4.2：判定口径留痕（原点锚点 + 轴方向 + 平移不再归零）
+                  tr("main.judge_origin_mm"): (
+                      "N/A" if self._judge_origin_mm() is None else
+                      "%.4f, %.4f" % self._judge_origin_mm()),
+                  tr("main.judge_axis_note"): tr("main.judge_axis_right_up_positive")}
         _mp = getattr(self, "_measured_pitch_mm", None)
         if _mp:
             params[tr("main.measured_pitch_mm")] = f"{float(_mp):.4f}"
@@ -4244,7 +4657,9 @@ class MainWindow(QMainWindow):
                            "pitch": float(self.sp_pitch.value()),
                            "dpi": float(self.sp_dpi.value()),
                            "array_source": getattr(self, "_array_source", ""),
-                           "measured_pitch_mm": getattr(self, "_measured_pitch_mm", None)}}
+                           "measured_pitch_mm": getattr(self, "_measured_pitch_mm", None),
+                           "pick_mode": self._pick_mode(),
+                           "origin_kind": getattr(self.grid, "origin_kind", "center") if self.grid else "center"}}
         try:
             with open(path, "w", encoding="utf-8") as fh:
                 json.dump(data, fh, ensure_ascii=False, indent=2)
@@ -4266,6 +4681,20 @@ class MainWindow(QMainWindow):
             """
             if data.get("grid"):
                 self.grid = GridDefinition.from_dict(data["grid"])
+                try:
+                    if getattr(self.grid, "_ortho_rejected_on_load", False):
+                        self._log(tr("main.project_ortho_rejected_on_load"))
+                except Exception:
+                    pass
+                _pp = (data.get("params") or {}).get("pitch")
+                if _pp is not None:
+                    try:
+                        if abs(float(_pp) - float(self.grid.pitch_mm)) > 1e-9:
+                            self._log(tr("main.project_pitch_mismatch",
+                                         a="%.6f" % float(self.grid.pitch_mm),
+                                         b="%.6f" % float(_pp)))
+                    except Exception:
+                        pass
                 # v4.1：恢复阵列可选参数（以工程内参数为准）与来源/实测间距留痕
                 _p = data.get("params", {}) or {}
                 try:
@@ -4280,6 +4709,14 @@ class MainWindow(QMainWindow):
                 except Exception:
                     pass
                 self._array_source = str(_p.get("array_source", "") or "")
+                _pm = str(_p.get("pick_mode", "") or "")
+                if _pm in PICK_MODES:
+                    try:
+                        self.cb_pick_mode.blockSignals(True)
+                        self.cb_pick_mode.setCurrentIndex(PICK_MODES.index(_pm))
+                        self.cb_pick_mode.blockSignals(False)
+                    except Exception:
+                        pass
                 self._measured_pitch_mm = _p.get("measured_pitch_mm")
                 self._manual_grid_snapshot = self.grid
                 self.view.clear_overlay()

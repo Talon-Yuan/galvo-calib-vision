@@ -1,9 +1,27 @@
 # -*- coding: utf-8 -*-
-"""一键自检：改动后先跑这个，不通过就不要打包。"""
+"""一键自检：改动后先跑这个，不通过就不要打包。
+
+用法
+----
+    python tools/selfcheck.py                     # 默认：基线缺失时 SKIP（不计失败）
+    python tools/selfcheck.py --require-baseline  # 严格：基线缺失即 FAIL（发布/打包前必用）
+
+基线目录解析顺序
+----------------
+    环境变量 GCV_BASELINE_SRC  >  下面硬编码的 _DEFAULT_BASELINE
+
+说明：`--require-baseline` 只影响"基线目录不存在"这一种情况的行为。
+不带该参数时保持历史行为（打印 SKIP，RESULT 不受影响），以免打断日常自检；
+带该参数时把"基线缺失"升级为 FAIL，防止外部机器/换盘后静默 SKIP 仍然 PASS。
+"""
 import hashlib
 import json, os, py_compile, sys
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-BASELINE = os.environ.get("GCV_BASELINE_SRC", "")  # 可选：外部基线树（缺失则 SKIP 该项）
+_DEFAULT_BASELINE = r"E:\GalvoCalibVision_项目交接_20261025\03_源码工程\GalvoCalibVision_src_v3.3_正交化"
+REQUIRE_BASELINE = "--require-baseline" in sys.argv[1:]
+_ENV_BASELINE = (os.environ.get("GCV_BASELINE_SRC") or "").strip()
+BASELINE = _ENV_BASELINE or _DEFAULT_BASELINE
+BASELINE_SOURCE = "env:GCV_BASELINE_SRC" if _ENV_BASELINE else "default(hardcoded)"
 fails = []
 def say(ok, msg):
     print(("PASS  " if ok else "FAIL  ") + msg)
@@ -75,6 +93,10 @@ def md5(p):
     with open(p, "rb") as f:
         for b in iter(lambda: f.read(1 << 20), b""): h.update(b)
     return h.hexdigest()
+print("[baseline] require=%s source=%s exists=%s\n           path=%s"
+      % ("true(--require-baseline)" if REQUIRE_BASELINE else "false",
+         BASELINE_SOURCE, os.path.isdir(BASELINE), BASELINE))
+
 if os.path.isdir(BASELINE):
     # core 校验三态：未改(byte-identical) / 授权守卫补丁(allowlist+哈希匹配) / 越权改动(FAIL)
     # 授权补丁必须满足：只加输入校验或异常兜底，合法输入数值不变（tools/core_ab.py 已验 A/B 一致）。
@@ -106,7 +128,13 @@ if os.path.isdir(BASELINE):
     for d in patched[:8]: print("      PATCH(OK)", d)
     for d in diff[:8]: print("      DIFF(UNAUTHORIZED)", d)
 else:
-    print("SKIP baseline missing:", BASELINE)
+    if REQUIRE_BASELINE:
+        say(False, "baseline missing (--require-baseline 严格模式): " + BASELINE)
+        print("       → 严格模式要求基线必须存在：请设 GCV_BASELINE_SRC 指向 v3.3 基线树，")
+        print("         或去掉 --require-baseline 回到默认的 SKIP 行为。")
+    else:
+        print("SKIP baseline missing:", BASELINE)
+        print("       （默认模式：基线缺失只 SKIP，不计入失败；发布/打包前请改用 --require-baseline）")
 
 print()
 print("RESULT =", "PASS" if not fails else ("FAIL: " + "; ".join(fails)))
