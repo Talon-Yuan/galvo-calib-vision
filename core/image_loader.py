@@ -1,16 +1,60 @@
 # -*- coding: utf-8 -*-
-"""图像加载与大图处理：支持中文路径、整图/降采样加载、ROI 读取。"""
+"""图像加载与大图处理：支持中文路径、整图/降采样加载、ROI 读取。
+
+v4.3：新增"检测解码策略"——
+  * 原图处理（use_full=True）：按原始分辨率解码灰度（2.23Gpx 也可，需内存足够）；
+  * 后台 1/2（use_full=False）：按 1/2 分辨率解码后放大到原尺寸，坐标口径不变。
+两种模式的 original_gray() 返回数组尺寸始终等于原图尺寸，下游检测代码无需改动。
+"""
+import ctypes
 import os
 import threading
 from typing import Optional, Tuple
+
+# 必须在 import cv2 之前设置：OpenCV 默认限制约 2^30 像素，2.23Gpx 扫描图会直接解码失败
+os.environ.setdefault("OPENCV_IO_MAX_IMAGE_PIXELS", "4000000000")
 
 import cv2
 import numpy as np
 
 # 整图加载上限（像素数）。超过则降采样加载并提示精度受限。
-MAX_FULL_PIXELS = 200_000_000  # 约 2 亿像素（A4@4800dpi 的 1.4 亿可整图）
-MAX_FULL_PIXELS_FULL = 640_000_000  # "整图处理(不降采样)"模式上限（约 6.4 亿像素，A3@4800dpi 约 5.6 亿可整图）
+MAX_FULL_PIXELS = 200_000_000  # 预览/交互图目标像素（约 2 亿；与检测解码策略无关）
+MAX_FULL_PIXELS_FULL = 640_000_000  # 兼容旧语义（小图整图加载）
+# 真原图灰度解码硬上限：2.23Gpx A4@4800dpi 可解；再大按 1/2 后台处理
+MAX_FULL_PIXELS_HARD = 2_600_000_000
 PREVIEW_MAX_EDGE = 2400  # 预览图最长边
+
+
+def available_ram_gb() -> float:
+    """可用物理内存（GB）；失败返回 0（调用方按"未知"保守处理）。"""
+    try:
+        class _MEMORYSTATUSEX(ctypes.Structure):
+            _fields_ = [("dwLength", ctypes.c_ulong), ("dwMemoryLoad", ctypes.c_ulong),
+                        ("ullTotalPhys", ctypes.c_ulonglong), ("ullAvailPhys", ctypes.c_ulonglong),
+                        ("ullTotalPageFile", ctypes.c_ulonglong), ("ullAvailPageFile", ctypes.c_ulonglong),
+                        ("ullTotalVirtual", ctypes.c_ulonglong), ("ullAvailVirtual", ctypes.c_ulonglong),
+                        ("ullAvailExtendedVirtual", ctypes.c_ulonglong)]
+        st = _MEMORYSTATUSEX()
+        st.dwLength = ctypes.sizeof(_MEMORYSTATUSEX)
+        if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(st)):
+            return float(st.ullAvailPhys) / (1024.0 ** 3)
+    except Exception:
+        pass
+    return 0.0
+
+
+def image_size_exact(path: str) -> Optional[Tuple[int, int]]:
+    """读图片真实像素尺寸（只读文件头，不做整图解码）。
+
+    v4.3：原来用 IMREAD_REDUCED_8 探针 *8 估算原尺寸，对尺寸不是 8 的倍数的图会差几像素
+    （如 39685→39688），导致坐标映射轻微伸缩。这里优先用 PIL 读头拿到精确尺寸。
+    """
+    try:
+        from PIL import Image
+        with Image.open(path) as im:
+            return int(im.size[0]), int(im.size[1])
+    except Exception:
+        return None
 
 
 def imread_unicode(path: str, flags: int = cv2.IMREAD_UNCHANGED) -> Optional[np.ndarray]:
@@ -40,8 +84,11 @@ class ImageSource:
         self.origin_w = 0
         self.origin_h = 0
         self.warning: str = ""
+        self.decode_mode: str = "auto"   # full=真原图 / half=后台1/2
+        self.orig_gray_scale: float = 1.0
         self._orig_gray: Optional[np.ndarray] = None
         self._orig_gray_lock = threading.Lock()
+        self._orig_gray_level: int = 0   # 实际解码级别 1/2/4
         self._load(use_full)
 
     def _load(self, use_full: bool = False):
@@ -50,13 +97,17 @@ class ImageSource:
             probe = imread_unicode(self.path, cv2.IMREAD_REDUCED_GRAYSCALE_8)
         if probe is None:
             raise ValueError("无法读取图片，请确认文件格式与路径")
-        self.origin_h, self.origin_w = probe.shape[:2]
-        self.origin_w *= 8
-        self.origin_h *= 8
+        _exact = image_size_exact(self.path)
+        if _exact is not None:
+            self.origin_w, self.origin_h = int(_exact[0]), int(_exact[1])
+        else:
+            self.origin_h, self.origin_w = probe.shape[:2]
+            self.origin_w *= 8
+            self.origin_h *= 8
         n_pix = self.origin_w * self.origin_h
-        limit = MAX_FULL_PIXELS_FULL if use_full else MAX_FULL_PIXELS
-        # 尝试整图
-        if n_pix <= limit:
+        # v4.3：交互/预览图固定按 ~MAX_FULL_PIXELS 像素加载（省内存，长边再缩到 2400）；
+        # 检测用的"原图/1/2"解码在 original_gray() 里按需进行，二者解耦。
+        if n_pix <= MAX_FULL_PIXELS:
             img = imread_unicode(self.path, cv2.IMREAD_UNCHANGED)
             if img is None:
                 img = imread_unicode(self.path, cv2.IMREAD_COLOR)
@@ -65,28 +116,29 @@ class ImageSource:
                 self.width, self.height = self.origin_w, self.origin_h
                 self.scale = 1.0
                 return
-        # 降采样加载
-        target = limit
-        scale = np.sqrt(target / n_pix)
-        factor = max(2, int(1.0 / scale))
-        img = imread_unicode(self.path, cv2.IMREAD_REDUCED_COLOR_2 if factor <= 2 else
-                             cv2.IMREAD_REDUCED_COLOR_4 if factor <= 4 else
-                             cv2.IMREAD_REDUCED_COLOR_8)
+        target = MAX_FULL_PIXELS
+        scale = np.sqrt(target / float(n_pix))
+        factor = max(2, int(round(1.0 / scale)))
+        factor = min(8, max(2, 2 ** int(round(np.log2(factor)))))
+        flags = {2: cv2.IMREAD_REDUCED_COLOR_2, 4: cv2.IMREAD_REDUCED_COLOR_4,
+                 8: cv2.IMREAD_REDUCED_COLOR_8}.get(factor, cv2.IMREAD_REDUCED_COLOR_8)
+        img = imread_unicode(self.path, flags)
         if img is None:
-            img = imread_unicode(self.path, cv2.IMREAD_REDUCED_GRAYSCALE_2 if factor <= 2 else
-                                 cv2.IMREAD_REDUCED_GRAYSCALE_4 if factor <= 4 else
-                                 cv2.IMREAD_REDUCED_GRAYSCALE_8)
+            gflags = {2: cv2.IMREAD_REDUCED_GRAYSCALE_2, 4: cv2.IMREAD_REDUCED_GRAYSCALE_4,
+                      8: cv2.IMREAD_REDUCED_GRAYSCALE_8}.get(factor, cv2.IMREAD_REDUCED_GRAYSCALE_8)
+            img = imread_unicode(self.path, gflags)
         if img is None:
             raise ValueError("无法读取图片")
         self.full = img
-        self.scale = self.origin_w / img.shape[1]
+        self.scale = self.origin_w / float(img.shape[1])
         self.width, self.height = img.shape[1], img.shape[0]
+        # 提示只描述"检测解码策略"，避免把预览降采样误当成检测精度损失
         if use_full:
-            self.warning = (f"图像极大（{self.origin_w}×{self.origin_h}），超过整图处理上限，"
-                            f"已按 1/{round(self.scale)} 降采样加载用于预览与检测。如需全精度请分块扫描。")
+            self.warning = (f"图像极大（{self.origin_w}×{self.origin_h}）：已启用原图处理，"
+                            f"检测按原始分辨率解码；预览仍用 1/{round(self.scale)} 降采样显示。")
         else:
-            self.warning = (f"图像过大（{self.origin_w}×{self.origin_h}），已按 1/{round(self.scale)} "
-                            f"降采样加载用于预览与检测，输出坐标按比例还原。如需全精度请勾选“整图处理”或分块扫描。")
+            self.warning = (f"图像极大（{self.origin_w}×{self.origin_h}）：检测按后台 1/2 降采样处理"
+                            f"（坐标已还原到原尺寸）；如需全精度请勾选“原图处理”。")
 
     def _ensure_precheck(self):
         """懒加载预检小图（约 1/8 降采样灰度，用于两阶段检测的候选预检）。"""
@@ -141,25 +193,53 @@ class ImageSource:
         return cv2.cvtColor(self.full, cv2.COLOR_BGR2GRAY)
 
     def original_gray(self) -> np.ndarray:
-        """原始分辨率灰度图（uint8，懒加载缓存）。
-        检测线程必须使用本图：无论预览/整图是否降采样，十字中心精测都在
-        原始分辨率上进行，避免坐标按 scale 还原带来的精度损失（“整图处理”）。"""
+        """检测用灰度图（尺寸恒等于原图，uint8，懒加载缓存）。
+
+        v4.3 解码策略：
+          * use_full=True 且内存足够 & 像素数<=MAX_FULL_PIXELS_HARD → 原始分辨率解码；
+          * 否则 → 1/2 分辨率解码后放大到原尺寸（坐标口径不变，精度约 ±1 原像素）。
+        返回数组尺寸恒为 (origin_h, origin_w)，下游检测代码无需感知解码级别。
+        """
         g = getattr(self, "_orig_gray", None)
         if g is not None:
             return g
-        # 互斥锁：防止自动检测（DetectorThread）与手动识别灰度加载（GrayLoaderThread）
-        # 并发对同一张超大图重复 IMREAD_GRAYSCALE 全分辨率解码——双份 2GB+ 灰度数组 +
-        # 双倍 CPU 满载会造成内存/CPU 叠加，表现为程序“干死”。锁内解码、后到者复用缓存。
         with self._orig_gray_lock:
             g = getattr(self, "_orig_gray", None)
             if g is not None:
                 return g
-            g = imread_unicode(self.path, cv2.IMREAD_GRAYSCALE)
+            n_pix = int(self.origin_w) * int(self.origin_h)
+            avail = available_ram_gb()
+            want_full = bool(self.use_full) and n_pix > 0 and n_pix <= MAX_FULL_PIXELS_HARD
+            # 真原图灰度约 n_pix 字节；要求可用内存 >= 需求*1.2 + 1GB，避免 OOM
+            if want_full and avail > 0 and avail < n_pix / (1024.0 ** 3) * 1.2 + 1.0:
+                want_full = False
+            levels = [1, 2, 4] if want_full else [2, 4]
+            g = None
+            used = 0
+            for level in levels:
+                flags = {1: cv2.IMREAD_GRAYSCALE, 2: cv2.IMREAD_REDUCED_GRAYSCALE_2,
+                         4: cv2.IMREAD_REDUCED_GRAYSCALE_4}.get(level, cv2.IMREAD_GRAYSCALE)
+                try:
+                    cand = imread_unicode(self.path, flags)
+                except MemoryError:
+                    cand = None
+                if cand is not None:
+                    g = cand
+                    used = level
+                    break
             if g is None:
-                # 回退：降采样图放大回原始尺寸（精度受限，仅兜底）
+                # 最后兜底：用预览图灰度放大（精度受限，明确告警）
                 g = cv2.cvtColor(self.full, cv2.COLOR_BGR2GRAY) if self.full.ndim == 3 else self.full
-                if self.scale != 1.0:
-                    g = cv2.resize(g, (self.origin_w, self.origin_h), interpolation=cv2.INTER_CUBIC)
+                used = max(2, int(round(self.scale)))
+            # 统一放大到原图尺寸（1/2 或 1/4 → 原尺寸），下游坐标口径恒定
+            if g.shape[0] != self.origin_h or g.shape[1] != self.origin_w:
+                g = cv2.resize(g, (self.origin_w, self.origin_h), interpolation=cv2.INTER_CUBIC)
+            self.orig_gray_scale = 1.0
+            self._orig_gray_level = used
+            self.decode_mode = "full" if used == 1 else "half"
+            if used >= 4:
+                self.warning = (f"原图解码失败（{self.origin_w}×{self.origin_h}），已用 1/{used} 预览图放大，"
+                                f"精度受限；建议增加内存或分块扫描。")
             self._orig_gray = g
             return g
 

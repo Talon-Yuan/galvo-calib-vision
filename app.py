@@ -3,6 +3,11 @@
 import os
 import sys
 
+# v4.3：必须在任何 cv2 导入之前放开 OpenCV 像素上限，否则 2.23Gpx（A4@4800dpi）
+# 扫描图会直接解码失败，只能退回降采样图放大（假"原图"）。
+# 该环境变量只在 import cv2 时读取一次，写在 cv2 导入之后无效。
+os.environ.setdefault("OPENCV_IO_MAX_IMAGE_PIXELS", "4000000000")
+
 
 # ---- 崩溃落盘（v3.5）：窗口化程序崩溃时没有控制台、不弹窗，必须主动留堆栈 ----
 # faulthandler 能捕获 Python 层之外的硬崩溃（段错误/栈溢出/Qt 原生崩溃）；

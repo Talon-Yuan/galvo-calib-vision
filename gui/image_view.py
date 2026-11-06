@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 """图像预览控件：QGraphicsView 大图预览，支持缩放/平移/叠加绘制/点选/拖拽微调。"""
+import math
 from typing import Callable, List, Optional, Tuple
 
 from PyQt5.QtCore import QPointF, Qt, pyqtSignal
@@ -183,18 +184,26 @@ class ImageView(QGraphicsView):
         return el
 
     def add_cross_mark(self, px: float, py: float, size: float = 10.0, color: str = "#34c759",
-                       pen_w: float = 2.0, pick_idx: int = -1, label: str = ""):
-        """叠加十字标记。label 非空时在右上角显示序号文本（随拖拽联动，受 LOD 控制）。
+                       pen_w: float = 2.0, pick_idx: int = -1, label: str = "", angle: float = 0.0):
+        """叠加十字标记；angle(弧度) 使十字臂与阵列方向对齐（阵列斜置时不再恒为水平/竖直）。
+
+        label 非空时在右上角显示序号文本（随拖拽联动，受 LOD 控制）。
         pick_idx>=0 时登记为可拖拽点图形。"""
         pen = QPen(QColor(color), pen_w)
-        l1 = self._scene.addLine(px - size, py, px + size, py, pen)
-        l2 = self._scene.addLine(px, py - size, px, py + size, pen)
+        ca, sa = math.cos(angle), math.sin(angle)
+        # 横臂沿阵列 X 方向；竖臂沿其垂直方向（与真实十字臂一致）
+        ax1, ay1 = -size * ca, -size * sa
+        ax2, ay2 = size * ca, size * sa
+        bx1, by1 = size * sa, -size * ca
+        bx2, by2 = -size * sa, size * ca
+        l1 = self._scene.addLine(px + ax1, py + ay1, px + ax2, py + ay2, pen)
+        l2 = self._scene.addLine(px + bx1, py + by1, px + bx2, py + by2, pen)
         self._overlay_items.extend([l1, l2])
         if pick_idx >= 0:
             self._ensure_pick_graphics(pick_idx)
             self._pick_graphics[pick_idx].extend([
-                (l1, [(-size, 0.0), (size, 0.0)]),
-                (l2, [(0.0, -size), (0.0, size)]),
+                (l1, [(ax1, ay1), (ax2, ay2)]),
+                (l2, [(bx1, by1), (bx2, by2)]),
             ])
         if label:
             t = QGraphicsTextItem(label)
@@ -347,7 +356,8 @@ class ImageView(QGraphicsView):
         """叠加阵列原点 O（= 阵列几何中心）核对锚点，scene/预览坐标。
 
         样式对齐 OpenCV drawFrameAxes 惯例：原点空心圆 + 红 X 短轴 + 绿 Y 短轴；
-        轴方向取 grid.x_dir_px / y_dir_px 实测方向，阵列斜置时亦能读出朝向。
+        红 X 取 grid.x_dir_px（向右）；绿 Y 取 **-y_dir_px**——grid.y_dir_px 是
+        "行方向"（图像向下），物理 +Y 向上，故取反，否则绿箭头会朝下（v4.3 修正）。
         锚点不注册 pick_idx（O 不是结果点，注册会被拖拽链路误当作第 N 点移动），
         也不进 _label_items（不参与 LOD 隐藏：缩远时锚点最需要可见）。
         """
@@ -359,7 +369,7 @@ class ImageView(QGraphicsView):
         self._overlay_items.append(circ)
         self._anchor_items.append(circ)
         for (dx, dy), c in (((x_dir[0], x_dir[1]), ax_x_color),
-                            ((y_dir[0], y_dir[1]), ax_y_color)):
+                            ((-y_dir[0], -y_dir[1]), ax_y_color)):
             n = (dx * dx + dy * dy) ** 0.5 or 1.0
             ex, ey = px + dx / n * size, py + dy / n * size
             ln = self._scene.addLine(px, py, ex, ey, QPen(QColor(c), pen_w))

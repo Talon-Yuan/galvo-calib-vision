@@ -290,7 +290,9 @@ class CalibrationWidget(QWidget):
         h_dil.addWidget(self.sp_dilation)
         h_dil.addWidget(self.lbl_dilation_rec)
         self.chk_full = QCheckBox(tr("common.full_image_processing_no_downscale"))
-        self.chk_full.setToolTip(tr("calib.when_checked_oversized_images_load_at_full_resolutio"))
+        # v4.3：棋盘格标定默认勾选"原图处理"（真正的原始分辨率解码；内存不足时加载器自动降级）
+        self.chk_full.setChecked(True)
+        self.chk_full.setToolTip(tr("common.full_decode_hint"))
         self.cb_order = QComboBox(); self.cb_order.addItems([tr("calib.2nd_order"), tr("calib.3rd_order")])
         self.cb_method = QComboBox(); self.cb_method.addItems([tr("calib.sb_robust"), tr("calib.classic")])
         self.chk_subpixel = QCheckBox(tr("calib.subpixel_refinement")); self.chk_subpixel.setChecked(True)

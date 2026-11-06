@@ -1145,13 +1145,13 @@ class MainWindow(QMainWindow):
         # 保存的勾选状态（_on_load_project），旧工程行为不变。
         if _system_ram_gb() >= 16.0:
             self.chk_full.setChecked(True)
-        self.chk_full.setToolTip(tr("main.when_checked_oversized_images_load_at_full_resolutio") +
-                                 (tr("main.enough_ram_on_this_pc_full_image_processing_is_check")
-                                  if self.chk_full.isChecked() else
-                                  tr("main.pc_ram_under_16gb_downsampling_by_default_to_save_me")))
+        self.chk_full.setToolTip(tr("common.full_decode_hint") +
+                                 ("  |  RAM=%.0fGB" % _system_ram_gb() if _system_ram_gb() > 0 else ""))
         self.cb_method = QComboBox()
         self.cb_method.addItems([tr("main.projection_centroid_auto"), tr("main.edge_line_midpoint_edge_center")])
-        self.cb_method.setToolTip(tr("main.projection_centroid_threshold_projection_centroid_st"))
+        # v4.3：黑相纸（高对比、亮线/暗底）默认用"寻边法"；旧工程若已保存方法则按工程恢复
+        self.cb_method.setCurrentIndex(1)
+        self.cb_method.setToolTip(tr("main.center_method_default_edge_hint"))
         f2.addRow(tr("main.threshold"), self.cb_thresh)
         f2.addRow(tr("main.polarity"), self.cb_polarity)
         f2.addRow(tr("main.window_scale"), self.sp_win)
@@ -3021,6 +3021,15 @@ class MainWindow(QMainWindow):
             self._manual_active = False
             self._set_manual_btn_active(False)
             self.view.set_mode(MODE_NONE)
+        # v4.3：把本次检测的解码策略写进日志/状态，用户能确认"是否原图处理"
+        try:
+            _dm = getattr(self.src, "decode_mode", "auto")
+            if _dm == "full":
+                self._log(tr("main.decode_mode_full_original"))
+            elif _dm == "half":
+                self._log(tr("main.decode_mode_half_downsample"))
+        except Exception:
+            pass
         pts = self.grid.points_px()
         pitch = self.grid.pitch_px
         p = self._current_params()
@@ -3982,8 +3991,13 @@ class MainWindow(QMainWindow):
             if r is not None and r.ok:
                 ox, oy = self._pv(r.x / s, r.y / s)
                 color = "#ff9500" if is_manual else "#34c759"
+                try:
+                    _xv = np.asarray(self.grid.x_dir_px, np.float64)
+                    _ang = math.atan2(float(_xv[1]), float(_xv[0]))
+                except Exception:
+                    _ang = 0.0
                 self.view.add_cross_mark(ox, oy, size=12, color=color, pick_idx=i,
-                                         label=str(self._order_display_no(i)))
+                                         label=str(self._order_display_no(i)), angle=_ang)
                 if is_sel:
                     self.view.add_marker(ox, oy, "#ffffff", radius=16, pen_w=1.5)
                 self.view._pick_points.append((ox, oy))
