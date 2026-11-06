@@ -1557,6 +1557,22 @@ class MainWindow(QMainWindow):
         与主流程用的 self.src 分离，避免标定预览覆盖导致检测/导出用错图。"""
         return getattr(self, "_preview_src", None) or self.src
 
+    def _show_main_preview(self):
+        """把预览切回主流程相纸图（离开标定页时调用）。
+
+        _pv() 按"当前显示图"的 preview_scale 换算，而叠加坐标用 self.src.scale 归一；
+        两者必须是同一张图，否则标记会按比例错位（见 B5 §2.4 坐标口径）。
+        """
+        src = self.src
+        if src is None:
+            return
+        try:
+            self._preview_src = src
+            self.view.show_image(src.preview(), src.origin_w, src.origin_h)
+            self._redraw_marks()
+        except Exception:
+            pass
+
     def _pv(self, lx: float, ly: float) -> Tuple[float, float]:
         """加载分辨率坐标 → 预览坐标（按当前显示图的降采样比例换算）。"""
         src = self._display_src()
@@ -1735,6 +1751,9 @@ class MainWindow(QMainWindow):
             target = 0 if idx == 0 else (2 if idx >= 3 else 1)
             if hasattr(self, "tabs"):
                 self.tabs.setCurrentIndex(target)
+            if idx != 0:
+                # 离开标定页：预览切回相纸图，恢复 _pv 与 self.src.scale 的同图口径
+                self._show_main_preview()
             if idx == 1:
                 # 第 2 步=导入相纸扫描图：直接弹导入，避免用户再走菜单误选到棋盘格
                 self._on_open_image()
@@ -1886,6 +1905,11 @@ class MainWindow(QMainWindow):
             return
         src, preview = obj
         self.src = src
+        # ★ 坐标口径（B5 §2.4）：_pv() 按"当前显示图"的 preview_scale 换算，而所有
+        # 叠加坐标都用 self.src.scale 归一。若此处不把显示源切回相纸图，
+        # 先标定（显示源=棋盘格）再导入相纸后，_pv() 仍用棋盘格的 preview_scale，
+        # 导致点选标记/阵列十字整体错位（本次线上 bug 的根因）。
+        self._preview_src = src
         try:
             self.lbl_preview_placeholder.hide()
         except Exception:
