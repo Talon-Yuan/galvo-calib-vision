@@ -106,7 +106,7 @@ CATALOG: Dict[str, Tuple[str, str]] = {
     'calib.calibration_saved_path': ('标定参数已保存：{path}', 'Calibration saved: {path}'),
     'common.save_failed': ('保存失败', 'Save Failed'),
     'main.galvo_calibration_vision_software': ('振镜校准视觉定位软件 GalvoCalibVision', 'Galvo Calibration Vision Software'),
-    'main.app_startup_version': ('软件启动 v4.3.2（点数值更忠实原图）', 'App started v4.3.2 (more faithful point values)'),
+    'main.app_startup_version': ('软件启动 v4.3.3（失败点兜底补检）', 'App started v4.3.3 (failed-point fallback detection)'),
     'main.main_toolbar': ('主工具栏', 'Main Toolbar'),
     'main.import_scan': ('导入扫描图', 'Import Scan'),
     'main.save_project': ('保存工程', 'Save Project'),
@@ -609,6 +609,7 @@ CATALOG: Dict[str, Tuple[str, str]] = {
     'main.decode_mode_full_original': ('检测解码策略：原图处理（原始分辨率，未降采样）', 'Detection decode: full original resolution (no downscale)'),
     'main.decode_mode_half_downsample': ('检测解码策略：后台 1/2 降采样（坐标已还原到原尺寸，精度约±1px）', 'Detection decode: background 1/2 downsample (coords restored, ~±1px)'),
     'common.full_decode_hint': ('勾选=原图处理（真原图解码，2.23Gpx 也可，首次约5-20s）；不勾选=后台1/2降采样（更快，精度约±1px）', 'Checked = full original decode (works for 2.23 Gpx, ~5-20 s first time); unchecked = background 1/2 downsample (faster, ~±1 px)'),
+    'main.local_retry_fallback_filled_points': ('局部精测兜底补回 {n} 个失败点（方法=local_retry，置信度0.9）', 'Local refine fallback recovered {n} failed point(s) (method=local_retry, conf=0.9)'),
     'main.picked_n_of_3': ('已选 {n}/3', 'Picked {n}/3'),
     'main.undo_last_point_hint': ('已删除上一个点，可继续删除或点选下一个点', 'Last point deleted; delete more or pick next'),
 }

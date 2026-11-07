@@ -28,7 +28,8 @@ from core.residual_correction import load_residual_correction
 from core.registration import (compare_models, compare_table, load_fit,
                                save_fit, select_model)
 from core.config import CrossDetectParams
-from core.cross_detector import CrossResult, detect_points, detect_points_fast, refine_manual_point, rematch_results_to_grid
+from core.cross_detector import (CrossResult, detect_cross_in_roi, detect_points,
+                              detect_points_fast, refine_manual_point, rematch_results_to_grid)
 from core.measurement_saver import _refine_win_for
 from core.excel_exporter import export_excel
 from core.template_parser import parse_template
@@ -205,6 +206,7 @@ class DetectorThread(QThread):
         self.max_workers = max_workers
         self.ref_angle_deg = ref_angle_deg  # 方向约束：以实测网格方向为基准（None=不约束）
         self.results: List[Optional[CrossResult]] = []
+        self.n_fallback = 0   # 失败点经"局部精测兜底"补回的个数（v4.3.3）
 
     def run(self):
         # 检测始终在【原始分辨率】灰度图上进行：
@@ -225,6 +227,81 @@ class DetectorThread(QThread):
                 precheck_scale=self.src.precheck_scale(),
                 max_workers=self.max_workers, progress_cb=self.progress.emit,
                 ref_angle_deg=self.ref_angle_deg)
+            # v4.3.3：失败点兜底（审计后最终版）。
+            # 1) 用已检出的好点拟合"网格理论点 → 实际像素"仿射，预测失败点位置；
+            # 2) 以预测点为种子，用完整单点检测 detect_points（与主检测同一套算法，
+            #    含十字校验/置信度门/扩窗重试）复核；
+            # 3) 结果必须离预测点足够近（≤ max(30, 0.03×pitch)）才接受，否则保持
+            #    DETECT_FAIL —— 不制造假点（红线2）。
+            try:
+                import numpy as _np
+                n_fb = 0
+                pitch = float(self.pitch_px)
+                ok_idx = [i for i, rr in enumerate(self.results)
+                          if rr is not None and getattr(rr, "ok", False)]
+                A = t = None
+                if len(ok_idx) >= 3:
+                    try:
+                        src_pts = _np.asarray([[float(self.points[i][0]), float(self.points[i][1])]
+                                              for i in ok_idx], _np.float64)
+                        dst_pts = _np.asarray([[float(self.results[i].x), float(self.results[i].y)]
+                                              for i in ok_idx], _np.float64)
+                        X = _np.hstack([src_pts, _np.ones((len(src_pts), 1))])
+                        coef, *_ = _np.linalg.lstsq(X, dst_pts, rcond=None)
+                        if _np.all(_np.isfinite(coef)):
+                            A = coef[:2].T
+                            t = coef[2]
+                    except Exception:
+                        A = t = None
+                d_max = max(30.0, 0.03 * pitch)
+                for i in range(min(len(self.results), len(self.points))):
+                    rr0 = self.results[i]
+                    if rr0 is not None and getattr(rr0, "ok", False):
+                        continue
+                    try:
+                        sx, sy = float(self.points[i][0]), float(self.points[i][1])
+                    except Exception:
+                        continue
+                    if A is not None:
+                        px_ = float(A[0, 0] * sx + A[0, 1] * sy + t[0])
+                        py_ = float(A[1, 0] * sx + A[1, 1] * sy + t[1])
+                    else:
+                        px_, py_ = sx, sy
+                    # 大 ROI 完整检测：half≈0.2×pitch（只含目标十字、不切掉长臂），
+                    # 走 detect_cross_in_roi 的"十字形状校验+置信度门"，不会造点。
+                    got = None
+                    try:
+                        half = int(max(800, min(4000, pitch * 0.20)))
+                        x0 = max(0, int(round(px_)) - half)
+                        y0 = max(0, int(round(py_)) - half)
+                        x1 = min(gray.shape[1], int(round(px_)) + half + 1)
+                        y1 = min(gray.shape[0], int(round(py_)) + half + 1)
+                        if x1 - x0 >= 40 and y1 - y0 >= 40:
+                            got = detect_cross_in_roi(gray[y0:y1, x0:x1], self.params,
+                                                      ref_angle_deg=self.ref_angle_deg)
+                            if got is not None and getattr(got, "ok", False):
+                                got = CrossResult(float(x0 + got.x), float(y0 + got.y), True,
+                                                  method="local_retry", refined=True,
+                                                  conf=float(getattr(got, "conf", 0.9)))
+                            else:
+                                got = None
+                    except Exception:
+                        got = None
+                    if got is None:
+                        continue
+                    gx, gy = float(got.x), float(got.y)
+                    d = ((gx - px_) ** 2 + (gy - py_) ** 2) ** 0.5
+                    if d > max(40.0, 0.10 * pitch):
+                        continue
+                    self.results[i] = got
+                    n_fb += 1
+                    try:
+                        self.progress.emit(min(0.99, 0.05 + 0.9 * (i + 1) / max(1, len(self.points))))
+                    except Exception:
+                        pass
+                self.n_fallback = n_fb
+            except Exception:
+                self.n_fallback = 0
             self.done.emit(self.results)
         except Exception:
             # 无异常兜底时 done 永不发出，界面永久卡在"重新检测中…"。
@@ -3190,6 +3267,12 @@ class MainWindow(QMainWindow):
             self._log(tr("main.stale_async_result_discarded"))
             return
         self._gray_warm = True
+        try:
+            _fb = int(getattr(self._detect_thread, "n_fallback", 0) or 0)
+            if _fb > 0:
+                self._log(tr("main.local_retry_fallback_filled_points", n=_fb))
+        except Exception:
+            pass
         if self.grid is None:
             # G02: detection finished after the frame was reset/re-picked (grid=None);
             # downstream code dereferences grid, so discard the stale result instead of crashing.
@@ -4942,3 +5025,4 @@ class DragSaveThread(QThread):
             self.done.emit(res)
         except Exception as e:
             self.done.emit(e)
+
