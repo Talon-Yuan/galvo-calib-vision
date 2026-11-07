@@ -51,8 +51,15 @@ def image_size_exact(path: str) -> Optional[Tuple[int, int]]:
     """
     try:
         from PIL import Image
-        with Image.open(path) as im:
-            return int(im.size[0]), int(im.size[1])
+        # 2.23Gpx 会触发 Pillow 的 DecompressionBombError（> 2*MAX_IMAGE_PIXELS），
+        # 这里只是读文件头尺寸，临时关闭该保护，读完恢复，避免大图回退到"探针×8"估算。
+        _old = Image.MAX_IMAGE_PIXELS
+        Image.MAX_IMAGE_PIXELS = None
+        try:
+            with Image.open(path) as im:
+                return int(im.size[0]), int(im.size[1])
+        finally:
+            Image.MAX_IMAGE_PIXELS = _old
     except Exception:
         return None
 

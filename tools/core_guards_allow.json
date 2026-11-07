@@ -6,8 +6,8 @@
       "reason": "guards / v4.2-v4.2.1 authorized semantics"
     },
     "core/image_loader.py": {
-      "sha256": "37781bbb01ffcc377a9d2e1c3903d70610551935e2f7b95b7b06c483b4a577b2",
-      "reason": "v4.3 authorized: full-original / background-1/2 decode strategy + exact image size"
+      "sha256": "1f4aa7b21ae0d50961366c86001fda9c96ebce1b8456467c88a649e48c84a13b",
+      "reason": "v4.3.2 authorized: exact image size for >2Gpx (PIL bomb guard off while reading header)"
     },
     "core/multi_pose_fit.py": {
       "sha256": "2848c3fa6bed5cd234410f830718d9ae8475a6b00f0ac2605a933eecda8b598f",

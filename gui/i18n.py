@@ -106,7 +106,7 @@ CATALOG: Dict[str, Tuple[str, str]] = {
     'calib.calibration_saved_path': ('标定参数已保存：{path}', 'Calibration saved: {path}'),
     'common.save_failed': ('保存失败', 'Save Failed'),
     'main.galvo_calibration_vision_software': ('振镜校准视觉定位软件 GalvoCalibVision', 'Galvo Calibration Vision Software'),
-    'main.app_startup_version': ('软件启动 v4.3.1（默认起点=左下角）', 'App started v4.3.1 (default start corner = image bottom-left)'),
+    'main.app_startup_version': ('软件启动 v4.3.2（点数值更忠实原图）', 'App started v4.3.2 (more faithful point values)'),
     'main.main_toolbar': ('主工具栏', 'Main Toolbar'),
     'main.import_scan': ('导入扫描图', 'Import Scan'),
     'main.save_project': ('保存工程', 'Save Project'),
