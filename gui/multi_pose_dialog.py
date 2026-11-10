@@ -79,13 +79,15 @@ class PoseImportThread(QThread):
                 self.done.emit(RuntimeError(tr("pose.no_chessboard_corners_detected_check_the_image_and_c")))
                 return
             det = det.astype(float)
-            # v4.3.4：检测点序对旋转摆放不可靠（归一化最近邻会配错），
-            # 这里先按理想网格做稳健匹配，保证 soft/nominal 逐点对应。
+            # v4.3.5：按理想网格做稳健匹配（带质量门）；失败必须报错，不静默继续。
+            from core.calibrator import _match_to_ideal
             try:
-                from core.calibrator import _match_to_ideal
                 det = _match_to_ideal(build_ideal_points(self.params), det)
             except Exception:
-                pass
+                det = None
+            if det is None:
+                self.done.emit(RuntimeError(tr("pose.corner_match_failed")))
+                return
             if src.scale != 1.0:
                 # 超大图按 scale 降采样加载，检测得到的角点在降采样坐标系；
                 # 必须还原到原始分辨率坐标后再换算物理坐标（否则坐标域错位，拟合全废）
@@ -114,7 +116,12 @@ class PoseFitThread(QThread):
             if res is None:
                 self.done.emit(RuntimeError(tr("pose.fit_failed_insufficient_valid_placements")))
                 return
-            self.done.emit(res)
+            rc, report = res
+            try:
+                loo = leave_one_out_validation(self.poses)
+            except Exception:
+                loo = None
+            self.done.emit((rc, report, loo))
         except Exception as e:  # noqa: BLE001
             self.done.emit(e)
 
@@ -453,15 +460,40 @@ class MultiPoseDialog(QDialog):
         if isinstance(res, Exception):
             QMessageBox.warning(self, tr("pose.fit_failed"), str(res))
             return
-        rc, report = res
+        if isinstance(res, tuple) and len(res) == 3:
+            rc, report, loo = res
+        else:
+            rc, report = res
+            loo = None
         self._rc = rc
-        self._report = format_report(report)
+        self._loo = loo
+        self._report = format_report(report, loo)
         self.report.setPlainText(self._report)
-        self.btn_save.setEnabled(True)
+        rms_a = report.get("rms_after_mm")
+        loo_w = loo.get("rms_worst_mm") if isinstance(loo, dict) else None
+        ok = (rms_a is not None and float(rms_a) <= 0.15
+              and isinstance(loo, dict) and bool(loo.get("pass_max_015")))
+        self._fit_quality_ok = ok
+        self.btn_save.setEnabled(ok)
+        if isinstance(loo, dict):
+            try:
+                self.lbl_param_loo.setText("%.4f mm" % float(loo.get("rms_mean_mm", float("nan"))))
+            except Exception:
+                pass
+        if not ok:
+            QMessageBox.warning(
+                self, tr("pose.fit_quality_gate_failed_title"),
+                tr("pose.fit_quality_gate_failed",
+                   rms=("%.4f" % rms_a) if rms_a is not None else "—",
+                   loo=("%.4f" % loo_w) if loo_w is not None else "—"))
 
     # ---------------- 保存 ----------------
     def _on_save(self):
         if self._rc is None:
+            return
+        if not getattr(self, "_fit_quality_ok", False):
+            QMessageBox.warning(self, tr("pose.fit_quality_gate_failed_title"),
+                                tr("pose.residual_layer_not_saved_quality_gate"))
             return
         default_dir = os.path.dirname(self.import_paths[0]) if self.import_paths[0] else ""
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S")

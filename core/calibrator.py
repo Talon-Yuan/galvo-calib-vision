@@ -340,25 +340,26 @@ def estimate_precision(rows: int, cols: int, square_mm: float, gap_mm: float,
     }
 
 
-def _match_to_ideal(ideal_mm: np.ndarray, detected: np.ndarray) -> np.ndarray:
-    """将检测角点按理想坐标顺序重排。
+def _match_to_ideal(ideal_mm: np.ndarray, detected: np.ndarray) -> Optional[np.ndarray]:
+    """将检测角点按理想坐标顺序重排（v4.3.5：带质量门，失败返回 None）。
 
-    v4.3.4：原实现用"归一化空间最近邻"，对标定板有较大旋转（如多摆放 ±5°/±10°）时
-    归一化只按包围盒缩放、不旋转，角点会配错（实测 0002~0004 RMS 变 2~3.7mm）。
-    现改为"四角仿射 + 迭代最近邻"：
-      1. 用四个极值角点（min/max(x+y)、min/max(x-y)）估计 ideal→detected 仿射；
-      2. 投影后最近邻配对，唯一则重拟合，迭代至稳定；
-      3. 若配对不唯一/退化，回退原归一化最近邻（保持旧行为）。
-    输出顺序与 ideal_mm 一致。
+    原"归一化包围盒最近邻"对旋转标定板会配错点（真实 ±5°/±10° 摆放 RMS 2.1~3.7mm），
+    现改为"四角仿射 + 迭代最近邻"，并加质量门：
+      - 点数不符 / 少于 8 点 → None；
+      - 配对不唯一、仿射退化（反射/奇异）→ None；
+      - 配对后仿射残差 max > 0.25×检测点间距 → None（捕获"唯一但错"、离群角点、≥45° 旋转）。
+    调用方必须处理 None（calibrate 返回失败；多摆放弹窗提示），**不再回退旧算法**。
     """
     ideal_mm = np.asarray(ideal_mm, np.float64)
     detected = np.asarray(detected, np.float64)
     n = len(ideal_mm)
     if n != len(detected) or n < 8:
-        out = np.zeros_like(detected)
-        for i, p in enumerate(ideal_mm):
-            out[i] = detected[int(np.argmin(((detected - p) ** 2).sum(1)))]
-        return out
+        return None
+    d2 = ((detected[:, None, :] - detected[None, :, :]) ** 2).sum(2)
+    np.fill_diagonal(d2, np.inf)
+    d0 = float(np.median(np.sqrt(d2.min(axis=1))))
+    if not np.isfinite(d0) or d0 <= 0:
+        return None
 
     def _corners(pts):
         s = pts[:, 0] + pts[:, 1]
@@ -371,30 +372,24 @@ def _match_to_ideal(ideal_mm: np.ndarray, detected: np.ndarray) -> np.ndarray:
         coef, *_ = np.linalg.lstsq(np.hstack([ic, np.ones((4, 1))]), dc, rcond=None)
         flat = np.ones((n, 1))
         idx = None
-        for _ in range(4):
+        for _ in range(5):
             proj = np.hstack([ideal_mm, flat]) @ coef
             dist2 = ((detected[None, :, :] - proj[:, None, :]) ** 2).sum(2)
             idx = dist2.argmin(axis=1)
             if len(set(idx.tolist())) != n:
-                idx = None
-                break
+                return None
             coef, *_ = np.linalg.lstsq(np.hstack([ideal_mm, flat]), detected[idx], rcond=None)
-        if idx is not None and len(set(idx.tolist())) == n:
-            return detected[idx]
+            if np.linalg.det(coef[:2, :]) <= 0:
+                return None
+        matched = detected[idx]
+        A = np.hstack([ideal_mm, flat])
+        coef2, *_ = np.linalg.lstsq(A, matched, rcond=None)
+        res = np.linalg.norm(A @ coef2 - matched, axis=1)
     except Exception:
-        pass
-    # 回退：旧归一化最近邻
-    def norm(pts):
-        mn = pts.min(axis=0)
-        mx = pts.max(axis=0)
-        rng = np.where(mx - mn > 0, mx - mn, 1.0)
-        return (pts - mn) / rng
-    id_n = norm(ideal_mm)
-    det_n = norm(detected)
-    out = np.zeros_like(detected)
-    for i, p in enumerate(id_n):
-        out[i] = detected[int(np.argmin(((det_n - p) ** 2).sum(1)))]
-    return out
+        return None
+    if not np.isfinite(res).all() or float(res.max()) > 0.25 * d0:
+        return None
+    return matched
 
 
 def calibrate(gray: np.ndarray, p: ChessboardParams,
@@ -412,7 +407,12 @@ def calibrate(gray: np.ndarray, p: ChessboardParams,
         n_det = 0 if detected is None else len(detected)
         return CalibResult(False, np.zeros((0, 2)), np.zeros((0, 2)), ideal_mm,
                            message=f"角点检测失败或数量不符：期望{n_ideal}，检出{n_det}。请检查棋盘格参数与扫描图像。")
-    detected = _match_to_ideal(ideal_mm, detected)
+    matched = _match_to_ideal(ideal_mm, detected)
+    if matched is None:
+        return CalibResult(False, np.zeros((0, 2)), np.zeros((0, 2)), ideal_mm,
+                           message="角点匹配失败：无法稳定对应到理想网格（旋转过大/局部错点/点数不符）。"
+                                   "请检查行列数、标定板是否完整与是否超出设计角度。")
+    detected = matched
     if px_scale != 1.0:
         detected = detected * px_scale
     # 校正场拟合：分区模式（默认，推荐 3x3 order=1）或全局多项式
