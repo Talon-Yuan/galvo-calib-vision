@@ -3,7 +3,7 @@
   "files": {
     "core/calibrator.py": {
       "sha256": "705134a57f43ae9541e6ee7ba1e22eced5971dba4d02b15f477808e1998e78b8",
-      "reason": "v4.3.6 authorized: outlier filter for cross auto-detect"
+      "reason": "v4.3.7 authorized: strict line-intersection center"
     },
     "core/image_loader.py": {
       "sha256": "1f4aa7b21ae0d50961366c86001fda9c96ebce1b8456467c88a649e48c84a13b",
@@ -30,12 +30,12 @@
       "reason": "v4.3.1 authorized: default numbering changed to bottom-left row-major (14 requirement)"
     },
     "core/cross_detector.py": {
-      "sha256": "cc8a24cdb4a671718c59a73cd90e1aa37595427f7041fc6a315bd1bab4334b91",
-      "reason": "v4.3.6 authorized: detection debug geometry / debug render"
+      "sha256": "bdbb04b0b1844a2673c1de431aaa4ec26276ff4561cc5fd53cd2df4275a4f7b9",
+      "reason": "v4.3.7 authorized: strict line-intersection center"
     },
     "core/debug_render.py": {
       "sha256": "31b1eda3ed6b546de1f09936cbe6220c65554fe259d163ed08fa582a35ae13c3",
-      "reason": "v4.3.6 authorized: detection debug geometry / debug render"
+      "reason": "v4.3.7 authorized: strict line-intersection center"
     }
   }
 }

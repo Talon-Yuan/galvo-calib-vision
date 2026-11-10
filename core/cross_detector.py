@@ -535,28 +535,28 @@ def _edge_center_improved(bw: np.ndarray, x: int, y: int, bw_: int, bh: int,
             if left_o.sum() > 0 and right_o.sum() > 0 and top_o.sum() > 0 and bottom_o.sum() > 0:
                 m_y = (float(ysg[left_o].mean()) + float(ysg[right_o].mean())) / 2.0
                 m_x = (float(xsg[top_o].mean()) + float(xsg[bottom_o].mean())) / 2.0
-                if math.hypot(mid_x - m_x, mid_y - m_y) > p.fit_vs_mean_max_delta_px:
-                    mid_x, mid_y = m_x, m_y
-                    slope_ok = False
+                # v4.3.7 严格化：四臂中线交点【唯一】采用；均值只做诊断，绝不因均值偏差
+                # 把交点换成均值（那正是"均值冒充交点"来源，P1/P13/P14/P25 曾因此偏移）。
+                if debug_out is not None:
+                    debug_out["fit_vs_mean_px"] = float(math.hypot(mid_x - m_x, mid_y - m_y))
     if not slope_ok:
-        # 回退：四臂像素均值（对称抵消，抗文字/噪点污染，外推稳定）。
-        # 分类用旧版对角线划分（|dx|>=|dy|），已实测在粗块/中心十字场景最稳
-        # （方向约束的线宽放宽会把中心块更多像素混入臂分类，破坏均值对称性）。
-        horiz_o = np.abs(dx) >= np.abs(dy)
-        vert_o = ~horiz_o
-        left_o = horiz_o & (dx < 0)
-        right_o = horiz_o & (dx >= 0)
-        top_o = vert_o & (dy < 0)
-        bottom_o = vert_o & (dy >= 0)
-        if left_o.sum() == 0 or right_o.sum() == 0 or top_o.sum() == 0 or bottom_o.sum() == 0:
-            return None
-        mid_y = (float(ysg[left_o].mean()) + float(ysg[right_o].mean())) / 2.0
-        mid_x = (float(xsg[top_o].mean()) + float(xsg[bottom_o].mean())) / 2.0
+        # v4.3.7 严格化：四臂中线拟合失败时，不再用"四臂像素均值"冒充交点
+        # （均值不是交点，会把中心带偏却仍报 edge_center）。
+        # 返回 None，由 detect_cross_in_roi 走质心兜底并显式标 centroid_fallback。
+        if debug_out is not None:
+            debug_out.update({
+                "fit_failed": True, "fit_used": False,
+                "bbox": (int(x), int(y), int(bw_), int(bh)),
+                "centroid": (float(cx0), float(cy0)),
+                "line_w": float(line_w),
+                "fits": {"l": fit_l, "r": fit_r, "t": fit_t, "b": fit_b},
+            })
+        return None
     # 识别过程几何（可视化/日志用）：四臂像素、四臂中线、交点、质心、是否回退均值
     if debug_out is not None:
-        def _sub(arr, k=1):
+        def _sub(arr):
             arr = np.asarray(arr, np.float64).reshape(-1, 2)
-            if k > 1 and len(arr) > 400:
+            if len(arr) > 400:
                 arr = arr[::max(1, len(arr) // 400)]
             return arr
         try:
@@ -720,29 +720,37 @@ def detect_cross_in_roi(roi_gray: np.ndarray, p: CrossDetectParams,
         # 寻边中线交点法（改进版）：十字形校验 + 四臂直线拟合 + 方向约束 + cornerSubPix 精化
         refined = _edge_center_improved(bw, x, y, bw_, bh, p, ref_angle_deg, debug_out=_dbg)
         if refined is None:
-            # 非十字目标/拟合失败/后验可疑：失败（交给扩窗重试或手动补点），不再回退前景质心
-            return None
-        cx, cy = refined
-        method = "edge_center"
-        # 精化补充：交点附近 cornerSubPix（沿用 projection 分支参数与超限回退逻辑）
-        if p.subpixel_refine and 0 < cx < roi_gray.shape[1] - 1 and 0 < cy < roi_gray.shape[0] - 1:
+            # v4.3.7 严格兜底：四臂中线拟合不出交点 → 允许"质心兜底"，
+            # 但必须显式标记 centroid_fallback（日志/CSV/表格可见），绝不冒称 edge_center。
             try:
-                win = p.refine_win
-                gray32 = roi_gray.astype(np.float32)
-                x0 = max(0, int(round(cx)) - win)
-                y0 = max(0, int(round(cy)) - win)
-                x1 = min(roi_gray.shape[1], int(round(cx)) + win + 1)
-                y1 = min(roi_gray.shape[0], int(round(cy)) + win + 1)
-                sub = gray32[y0:y1, x0:x1]
-                corner = np.array([[[cx - x0, cy - y0]]], dtype=np.float32)
-                cv2.cornerSubPix(sub, corner, (5, 5), (-1, -1),
-                                 (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 30, 0.01))
-                rx, ry = corner[0, 0, 0] + x0, corner[0, 0, 1] + y0
-                if abs(rx - cx) <= p.refine_max_delta and abs(ry - cy) <= p.refine_max_delta:
-                    cx, cy = rx, ry
-                    method = "edge_center+subpix"
-            except cv2.error:
-                pass
+                cx, cy, _sym_deg = _projection_center_sym(roi_gray, bw, x, y, bw_, bh, polarity, p)
+                method = "centroid_fallback"
+                _dbg.update({"method": method, "fit_used": False,
+                             "fallback_center": True, "fallback_reason": "fit_failed"})
+            except Exception:
+                return None
+        else:
+            cx, cy = refined
+            method = "edge_center"
+            # 精化补充：交点附近 cornerSubPix（沿用 projection 分支参数与超限回退逻辑）
+            if p.subpixel_refine and 0 < cx < roi_gray.shape[1] - 1 and 0 < cy < roi_gray.shape[0] - 1:
+                try:
+                    win = p.refine_win
+                    gray32 = roi_gray.astype(np.float32)
+                    x0 = max(0, int(round(cx)) - win)
+                    y0 = max(0, int(round(cy)) - win)
+                    x1 = min(roi_gray.shape[1], int(round(cx)) + win + 1)
+                    y1 = min(roi_gray.shape[0], int(round(cy)) + win + 1)
+                    sub = gray32[y0:y1, x0:x1]
+                    corner = np.array([[[cx - x0, cy - y0]]], dtype=np.float32)
+                    cv2.cornerSubPix(sub, corner, (5, 5), (-1, -1),
+                                     (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 30, 0.01))
+                    rx, ry = corner[0, 0, 0] + x0, corner[0, 0, 1] + y0
+                    if abs(rx - cx) <= p.refine_max_delta and abs(ry - cy) <= p.refine_max_delta:
+                        cx, cy = rx, ry
+                        method = "edge_center+subpix"
+                except cv2.error:
+                    pass
     else:
         # 投影质心改进版：对称窗口质心 + 迭代收敛（可选高斯拟合增强）
         cx, cy, _sym_deg = _projection_center_sym(roi_gray, bw, x, y, bw_, bh, polarity, p)
