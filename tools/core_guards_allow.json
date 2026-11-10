@@ -3,7 +3,7 @@
   "files": {
     "core/calibrator.py": {
       "sha256": "705134a57f43ae9541e6ee7ba1e22eced5971dba4d02b15f477808e1998e78b8",
-      "reason": "v4.3.11 authorized: trace export includes process"
+      "reason": "v4.3.12 authorized: audit P2 fixes"
     },
     "core/image_loader.py": {
       "sha256": "1f4aa7b21ae0d50961366c86001fda9c96ebce1b8456467c88a649e48c84a13b",
@@ -31,11 +31,11 @@
     },
     "core/cross_detector.py": {
       "sha256": "b754645619250673fe540fb801a84454155ea46111065dfee180b719f800c88c",
-      "reason": "v4.3.11 authorized: trace export includes process"
+      "reason": "v4.3.12 authorized: audit P2 fixes"
     },
     "core/debug_render.py": {
-      "sha256": "66c5245e046afa9cae136dadd62dfb6f619346c22c44f7f03440849a34d26aa5",
-      "reason": "v4.3.11 authorized: trace export includes process"
+      "sha256": "434dfde7bccbd35e1a5450778505470f1800e7b8c8c8f9272d085a0e3d06c81a",
+      "reason": "v4.3.12 authorized: audit P2 fixes"
     }
   }
 }

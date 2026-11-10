@@ -490,7 +490,7 @@ class CenterProbeThread(QThread):
         try:
             res = {"ok": False, "center_px": None, "x_dir": (1.0, 0.0),
                    "y_dir": (0.0, -1.0), "neighbors": 0,
-                   "measured_pitch_mm": None, "fallback_used": True,
+                   "measured_pitch_mm": None, "fallback_used": False,
                    "even_warning": False, "message": ""}
             pitch_px = self.pitch_mm * self.dpi / 25.4
             if pitch_px <= 1e-6:

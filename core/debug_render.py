@@ -181,6 +181,14 @@ def export_debug_process(gray: np.ndarray, results: list, out_dir: str,
     n = 0
     for i, r in enumerate(results):
         lab = labels[i] if i < len(labels) else ""
+        if r is None:
+            rows.append({"index": i + 1, "label": lab, "ok": False, "method": "",
+                         "conf": 0.0, "x": float("nan"), "y": float("nan"),
+                         "fallback_mean": False, "fit_used": False,
+                         "centroid_dx": float("nan"), "centroid_dy": float("nan"),
+                         "fit_vs_mean_px": float("nan"), "n_edge": 0,
+                         "note": "未检出，无过程图"})
+            continue
         p = os.path.join(out_dir, "%s%d.png" % (prefix, i + 1))
         rec = render_result_debug(gray, r, i + 1, p, label=lab)
         rows.append(rec)
@@ -212,9 +220,12 @@ def write_debug_log(out_dir: str, rows: list, title: str = "", extra: list | Non
     if title:
         lines.append(title)
     for rec in rows:
-        lines.append("点%d %s: method=%s conf=%.2f 交点=(%.2f, %.2f) 边沿点=%d%s" % (
+        lines.append("点%d %s: method=%s conf=%.2f 交点=(%.2f, %.2f) 质心差=(%s, %s)px 拟合vs均值=%s 边沿点=%d%s" % (
             rec.get("index", 0), rec.get("label", ""), rec.get("method", ""),
             rec.get("conf", 0.0), rec.get("x", float("nan")), rec.get("y", float("nan")),
+            ("%.2f" % rec["centroid_dx"]) if isinstance(rec.get("centroid_dx"), float) and rec["centroid_dx"] == rec["centroid_dx"] else "N/A",
+            ("%.2f" % rec["centroid_dy"]) if isinstance(rec.get("centroid_dy"), float) and rec["centroid_dy"] == rec["centroid_dy"] else "N/A",
+            ("%.2f" % rec["fit_vs_mean_px"]) if isinstance(rec.get("fit_vs_mean_px"), float) and rec["fit_vs_mean_px"] == rec["fit_vs_mean_px"] else "N/A",
             rec.get("n_edge", rec.get("n_arm", 0)),
             " [质心兜底]" if "centroid_fallback" in str(rec.get("method", "")) else ""))
     for ln in (extra or []):
