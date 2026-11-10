@@ -64,9 +64,9 @@ def main() -> int:
              "阵列 %dx%d，方法=%s，检测 %d/%d" % (rows, cols, args.method, len(ok), len(results))]
     n_fb = 0
     for rec in out["rows"]:
-        if rec["fallback_mean"]:
+        if "centroid_fallback" in str(rec["method"]):
             n_fb += 1
-        lines.append("点%d %s: method=%s conf=%.2f 交点=(%.2f, %.2f) 质心差=(%s, %s)px 拟合vs均值=%.2fpx 臂点=%d%s" % (
+        lines.append("点%d %s: method=%s conf=%.2f 交点=(%.2f, %.2f) 质心差=(%s, %s)px 拟合vs均值=%.2fpx 边沿点=%d%s" % (
             rec["index"], rec["label"], rec["method"], rec["conf"], rec["x"], rec["y"],
             ("%.2f" % rec["centroid_dx"]) if np.isfinite(rec["centroid_dx"]) else "N/A",
             ("%.2f" % rec["centroid_dy"]) if np.isfinite(rec["centroid_dy"]) else "N/A",
@@ -76,7 +76,7 @@ def main() -> int:
     for rec in out["rows"]:
         n_method[rec["method"]] = n_method.get(rec["method"], 0) + 1
     lines.append("方法统计：%s" % n_method)
-    lines.append("回退均值点数：%d" % n_fb)
+    lines.append("质心兜底点数：%d" % n_fb)
     try:
         with open(log_path, "w", encoding="utf-8") as f:
             f.write("\n".join(lines) + "\n")

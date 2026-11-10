@@ -72,7 +72,8 @@ def render_result_debug(gray: np.ndarray, r, index: int, out_path: str,
         return (int(round((x - m[0]) * scale)), int(round((y - m[1]) * scale)))
 
     if isinstance(dbg, dict):
-        ap = dbg.get("edge_points") or dbg.get("arm_pixels") or {}
+        _fallback = bool(dbg.get("fallback_center"))
+        ap = {} if _fallback else (dbg.get("edge_points") or dbg.get("arm_pixels") or {})
         total = 0
         for k, arr in ap.items():
             if arr is None or len(arr) == 0:
@@ -80,7 +81,7 @@ def render_result_debug(gray: np.ndarray, r, index: int, out_path: str,
             total += len(arr)
             for px_, py_ in np.asarray(arr, float):
                 cv2.circle(crop, to_img(px_, py_), 1, (0, 0, 255), -1)  # 红：寻边点
-        rec["n_arm"] = total
+        rec["n_edge"] = total
         # 四臂中线（拟合在 ROI 局部坐标，全局 = ROI 起点 + 局部）
         fits = dbg.get("fits") or {}
         r_roi = dbg.get("roi")
@@ -98,6 +99,8 @@ def render_result_debug(gray: np.ndarray, r, index: int, out_path: str,
                     pts.append(to_img(gx0 + a * v + b, gy0 + v))
                 cv2.line(crop, pts[0], pts[1], (0, 200, 0), 1, cv2.LINE_AA)
             try:
+                if _fallback:
+                    raise RuntimeError("fallback")
                 def _dash(p1, p2, color, dash=18, gap=12):
                     x1, y1 = p1; x2, y2 = p2
                     L = float(np.hypot(x2 - x1, y2 - y1))
@@ -181,7 +184,7 @@ def export_debug_process(gray: np.ndarray, results: list, out_dir: str,
         n += 1
     csv_path = os.path.join(out_dir, "识别过程记录.csv")
     cols = ["index", "label", "ok", "method", "conf", "x", "y", "fallback_mean",
-            "fit_used", "centroid_dx", "centroid_dy", "fit_vs_mean_px", "n_arm", "note"]
+            "fit_used", "centroid_dx", "centroid_dy", "fit_vs_mean_px", "n_edge", "note"]
     try:
         with open(csv_path, "w", encoding="utf-8-sig") as f:
             f.write(",".join(cols) + "\n")

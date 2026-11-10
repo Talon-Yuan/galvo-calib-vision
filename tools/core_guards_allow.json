@@ -3,7 +3,7 @@
   "files": {
     "core/calibrator.py": {
       "sha256": "705134a57f43ae9541e6ee7ba1e22eced5971dba4d02b15f477808e1998e78b8",
-      "reason": "v4.3.8 authorized: edge-line center"
+      "reason": "v4.3.9 authorized: edge_points shift + render fix"
     },
     "core/image_loader.py": {
       "sha256": "1f4aa7b21ae0d50961366c86001fda9c96ebce1b8456467c88a649e48c84a13b",
@@ -30,12 +30,12 @@
       "reason": "v4.3.1 authorized: default numbering changed to bottom-left row-major (14 requirement)"
     },
     "core/cross_detector.py": {
-      "sha256": "820795a00f8c5b19db621de9eaa6ebbe9cd593cfd7823b125461efd664a6419e",
-      "reason": "v4.3.8 authorized: edge-line center"
+      "sha256": "10640a325869f074699cce9dfb54aaaa491a82a1adfcc0843b03ddece7c50dae",
+      "reason": "v4.3.9 authorized: edge_points shift + render fix"
     },
     "core/debug_render.py": {
-      "sha256": "c1cbad5674824968e457b0b143d4f0e66fd7f2d9b8f48f85bc98e82fff4eb209",
-      "reason": "v4.3.8 authorized: edge-line center"
+      "sha256": "3640279fd5d092fc2ac5bc6ab5eb31682d87a61c0d33d0f7d3f2ff45adec44b9",
+      "reason": "v4.3.9 authorized: edge_points shift + render fix"
     }
   }
 }

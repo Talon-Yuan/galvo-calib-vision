@@ -602,7 +602,8 @@ def _edge_center_improved(bw: np.ndarray, x: int, y: int, bw_: int, bh: int,
             "bbox": (int(x), int(y), int(bw_), int(bh)),
             "centroid": (float(cx0), float(cy0)),
             "mid": (float(mid_x), float(mid_y)),
-            "mean_center": (float(mid_x), float(mid_y)),
+            "mean_center": (float(np.mean(vx)), float(np.mean(hy))),
+            "n_edge": int(len(hx) + len(vy)),
             "fit_used": True, "fallback_mean": False,
             "line_w": float(line_w),
             "fits": {
@@ -890,6 +891,13 @@ def _shift_debug(dbg, dx: float, dy: float):
             for k, arr in ap.items():
                 if arr is not None and len(arr):
                     ap[k] = np.asarray(arr, np.float64) + np.array([dx, dy])
+        # v4.3.9：边沿点/边沿中线样本也必须平移（否则红点画到图外）
+        for key in ("edge_points", "edge_center_samples"):
+            dd = dbg.get(key)
+            if isinstance(dd, dict):
+                for k, arr in dd.items():
+                    if arr is not None and len(arr):
+                        dd[k] = np.asarray(arr, np.float64) + np.array([dx, dy])
     except Exception:
         pass
 
