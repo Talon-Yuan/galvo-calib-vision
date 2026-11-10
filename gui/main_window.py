@@ -4218,6 +4218,25 @@ class MainWindow(QMainWindow):
             pm = self.view.grab_scene_image(scale=2.0, force_labels=True)
             pm.save(path)
             self.statusBar().showMessage(tr("main.trace_image_exported_p", p=path), 6000)
+            # v4.3.11：整图痕迹导出时，把识别过程（彩色 ROI + CSV + log）一并保留
+            try:
+                import os as _os
+                from core.debug_render import export_debug_process, write_debug_log
+                base, _ext = _os.path.splitext(path)
+                dbg_dir = base + "_识别过程"
+                gray = self.src.original_gray()
+                labels = ["P%d" % (i + 1) for i in range(len(self.results))]
+                out = export_debug_process(gray, self.results, dbg_dir, labels=labels)
+                from collections import Counter as _CC
+                stats = _CC([r.method for r in self.results if r is not None and r.ok])
+                n_fb = sum(1 for r in self.results
+                           if r is not None and "centroid_fallback" in str(getattr(r, "method", "")))
+                logp = write_debug_log(
+                    dbg_dir, out["rows"], title="识别过程（随整图痕迹导出）：%s" % _os.path.basename(path),
+                    extra=["方法统计：%s" % dict(stats), "质心兜底点数：%d" % n_fb])
+                self._log(tr("main.trace_export_debug_done", d=dbg_dir, n=out["n"], log=logp))
+            except Exception as e2:  # noqa: BLE001
+                self._log(tr("main.trace_export_debug_failed", e=str(e2)))
         except Exception as e:
             QMessageBox.critical(self, tr("main.export_trace_image_full_2"),
                                  tr("main.export_failed_e", e=str(e)))

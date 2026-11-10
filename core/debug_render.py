@@ -203,3 +203,26 @@ def export_debug_process(gray: np.ndarray, results: list, out_dir: str,
     except Exception:
         csv_path = ""
     return {"dir": out_dir, "n": n, "csv": csv_path, "rows": rows}
+
+
+def write_debug_log(out_dir: str, rows: list, title: str = "", extra: list | None = None) -> str:
+    """写 识别过程.log（与 CLI 工具一致的口径，供 GUI 导出整图痕迹时保留过程）。"""
+    import os as _os
+    lines = []
+    if title:
+        lines.append(title)
+    for rec in rows:
+        lines.append("点%d %s: method=%s conf=%.2f 交点=(%.2f, %.2f) 边沿点=%d%s" % (
+            rec.get("index", 0), rec.get("label", ""), rec.get("method", ""),
+            rec.get("conf", 0.0), rec.get("x", float("nan")), rec.get("y", float("nan")),
+            rec.get("n_edge", rec.get("n_arm", 0)),
+            " [质心兜底]" if "centroid_fallback" in str(rec.get("method", "")) else ""))
+    for ln in (extra or []):
+        lines.append(str(ln))
+    p = _os.path.join(out_dir, "识别过程.log")
+    try:
+        with open(p, "w", encoding="utf-8") as f:
+            f.write("\n".join(lines) + "\n")
+    except Exception:
+        return ""
+    return p
