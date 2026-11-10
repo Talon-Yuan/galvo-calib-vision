@@ -79,6 +79,13 @@ class PoseImportThread(QThread):
                 self.done.emit(RuntimeError(tr("pose.no_chessboard_corners_detected_check_the_image_and_c")))
                 return
             det = det.astype(float)
+            # v4.3.4：检测点序对旋转摆放不可靠（归一化最近邻会配错），
+            # 这里先按理想网格做稳健匹配，保证 soft/nominal 逐点对应。
+            try:
+                from core.calibrator import _match_to_ideal
+                det = _match_to_ideal(build_ideal_points(self.params), det)
+            except Exception:
+                pass
             if src.scale != 1.0:
                 # 超大图按 scale 降采样加载，检测得到的角点在降采样坐标系；
                 # 必须还原到原始分辨率坐标后再换算物理坐标（否则坐标域错位，拟合全废）

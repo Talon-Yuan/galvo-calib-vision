@@ -2,8 +2,8 @@
   "_note": "guards + v4.2-v4.3.1 authorized semantics/fixes",
   "files": {
     "core/calibrator.py": {
-      "sha256": "4f45ae02add71e7880b52098844d007d98f9a0773daaa34706444427d4d1c9a9",
-      "reason": "guards / v4.2-v4.2.1 authorized semantics"
+      "sha256": "507e98f37a7e94768658c81152d05c8a87375314357de3707df74e0d90cdf168",
+      "reason": "v4.3.4 authorized: robust rotated-placement corner matching (_match_to_ideal)"
     },
     "core/image_loader.py": {
       "sha256": "1f4aa7b21ae0d50961366c86001fda9c96ebce1b8456467c88a649e48c84a13b",

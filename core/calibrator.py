@@ -341,8 +341,49 @@ def estimate_precision(rows: int, cols: int, square_mm: float, gap_mm: float,
 
 
 def _match_to_ideal(ideal_mm: np.ndarray, detected: np.ndarray) -> np.ndarray:
-    """将检测角点按理想坐标顺序重排（归一化空间最近邻）。
-    兼容 findChessboardCornersSB 返回顺序不确定的问题。"""
+    """将检测角点按理想坐标顺序重排。
+
+    v4.3.4：原实现用"归一化空间最近邻"，对标定板有较大旋转（如多摆放 ±5°/±10°）时
+    归一化只按包围盒缩放、不旋转，角点会配错（实测 0002~0004 RMS 变 2~3.7mm）。
+    现改为"四角仿射 + 迭代最近邻"：
+      1. 用四个极值角点（min/max(x+y)、min/max(x-y)）估计 ideal→detected 仿射；
+      2. 投影后最近邻配对，唯一则重拟合，迭代至稳定；
+      3. 若配对不唯一/退化，回退原归一化最近邻（保持旧行为）。
+    输出顺序与 ideal_mm 一致。
+    """
+    ideal_mm = np.asarray(ideal_mm, np.float64)
+    detected = np.asarray(detected, np.float64)
+    n = len(ideal_mm)
+    if n != len(detected) or n < 8:
+        out = np.zeros_like(detected)
+        for i, p in enumerate(ideal_mm):
+            out[i] = detected[int(np.argmin(((detected - p) ** 2).sum(1)))]
+        return out
+
+    def _corners(pts):
+        s = pts[:, 0] + pts[:, 1]
+        d = pts[:, 0] - pts[:, 1]
+        return np.array([pts[int(np.argmin(s))], pts[int(np.argmax(s))],
+                         pts[int(np.argmin(d))], pts[int(np.argmax(d))]], np.float64)
+
+    try:
+        ic, dc = _corners(ideal_mm), _corners(detected)
+        coef, *_ = np.linalg.lstsq(np.hstack([ic, np.ones((4, 1))]), dc, rcond=None)
+        flat = np.ones((n, 1))
+        idx = None
+        for _ in range(4):
+            proj = np.hstack([ideal_mm, flat]) @ coef
+            dist2 = ((detected[None, :, :] - proj[:, None, :]) ** 2).sum(2)
+            idx = dist2.argmin(axis=1)
+            if len(set(idx.tolist())) != n:
+                idx = None
+                break
+            coef, *_ = np.linalg.lstsq(np.hstack([ideal_mm, flat]), detected[idx], rcond=None)
+        if idx is not None and len(set(idx.tolist())) == n:
+            return detected[idx]
+    except Exception:
+        pass
+    # 回退：旧归一化最近邻
     def norm(pts):
         mn = pts.min(axis=0)
         mx = pts.max(axis=0)
@@ -352,8 +393,7 @@ def _match_to_ideal(ideal_mm: np.ndarray, detected: np.ndarray) -> np.ndarray:
     det_n = norm(detected)
     out = np.zeros_like(detected)
     for i, p in enumerate(id_n):
-        d = np.sum((det_n - p) ** 2, axis=1)
-        out[i] = detected[int(np.argmin(d))]
+        out[i] = detected[int(np.argmin(((det_n - p) ** 2).sum(1)))]
     return out
 
 
