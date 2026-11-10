@@ -11,14 +11,16 @@ from .config import CrossDetectParams
 
 
 class CrossResult:
-    __slots__ = ("x", "y", "ok", "method", "area", "refined", "conf", "fail_reason")
+    __slots__ = ("x", "y", "ok", "method", "area", "refined", "conf", "fail_reason", "debug")
 
     def __init__(self, x: float, y: float, ok: bool, method: str = "", area: float = 0.0,
-                 refined: bool = False, conf: float = 1.0, fail_reason: str = ""):
+                 refined: bool = False, conf: float = 1.0, fail_reason: str = "",
+                 debug=None):
         self.x, self.y, self.ok, self.method, self.area = x, y, ok, method, area
         self.refined = refined  # 手动点是否经吸附精化（识别过程记录用）
         self.conf = conf        # 检测置信度 [0,1]（方案D）：1.0=高置信，低置信时 ok=False
         self.fail_reason = fail_reason  # 失败原因标识（如 "LOW_CONF"），""=无
+        self.debug = debug      # 识别过程几何（寻边点/四臂中线/交点），供可视化与日志
 
 
 def _resolve_polarity(gray: np.ndarray, p: CrossDetectParams) -> str:
@@ -462,7 +464,8 @@ def _cross_shape_validate(sub: np.ndarray, cx: float, cy: float,
 
 def _edge_center_improved(bw: np.ndarray, x: int, y: int, bw_: int, bh: int,
                           p: CrossDetectParams,
-                          ref_angle_deg: Optional[float] = None) -> Optional[Tuple[float, float]]:
+                          ref_angle_deg: Optional[float] = None,
+                          debug_out: Optional[dict] = None) -> Optional[Tuple[float, float]]:
     """寻边中线交点法（改进版，2026-09-23 方案）：
     A. 十字形校验（臂数=4、正交、臂长比、方向约束）→ 过滤 X/Y 文字等非十字目标；
     B. 四臂稳健直线拟合替代像素均值（抗噪点/毛刺）；
@@ -549,8 +552,36 @@ def _edge_center_improved(bw: np.ndarray, x: int, y: int, bw_: int, bh: int,
             return None
         mid_y = (float(ysg[left_o].mean()) + float(ysg[right_o].mean())) / 2.0
         mid_x = (float(xsg[top_o].mean()) + float(xsg[bottom_o].mean())) / 2.0
+    # 识别过程几何（可视化/日志用）：四臂像素、四臂中线、交点、质心、是否回退均值
+    if debug_out is not None:
+        def _sub(arr, k=1):
+            arr = np.asarray(arr, np.float64).reshape(-1, 2)
+            if k > 1 and len(arr) > 400:
+                arr = arr[::max(1, len(arr) // 400)]
+            return arr
+        try:
+            debug_out.update({
+                "arm_pixels": {
+                    "left": _sub(np.stack([xsg[left], ysg[left]], 1)),
+                    "right": _sub(np.stack([xsg[right], ysg[right]], 1)),
+                    "top": _sub(np.stack([xsg[top], ysg[top]], 1)),
+                    "bottom": _sub(np.stack([xsg[bottom], ysg[bottom]], 1)),
+                },
+                "bbox": (int(x), int(y), int(bw_), int(bh)),
+                "centroid": (float(cx0), float(cy0)),
+                "mid": (float(mid_x), float(mid_y)),
+                "mean_center": (float(locals().get("m_x", mid_x)), float(locals().get("m_y", mid_y))),
+                "fit_used": bool(slope_ok),
+                "fallback_mean": bool(not slope_ok),
+                "line_w": float(line_w),
+                "fits": {"l": fit_l, "r": fit_r, "t": fit_t, "b": fit_b},
+            })
+        except Exception:
+            pass
     # D. 后验校验：中心与质心偏差 > 线宽×2 → 可疑（可能选中非十字目标/严重噪点）
     if abs(mid_x - cx0) > line_w * 2.0 or abs(mid_y - cy0) > line_w * 2.0:
+        if debug_out is not None:
+            debug_out["suspicious"] = True
         return None
     return mid_x, mid_y
 
@@ -684,9 +715,10 @@ def detect_cross_in_roi(roi_gray: np.ndarray, p: CrossDetectParams,
         return None
     x, y, bw_, bh = comp
     polarity = _resolve_polarity(roi_gray, p)
+    _dbg = {"method": p.method, "roi": (0, 0, int(roi_gray.shape[1]), int(roi_gray.shape[0]))}
     if p.method == "edge_center":
         # 寻边中线交点法（改进版）：十字形校验 + 四臂直线拟合 + 方向约束 + cornerSubPix 精化
-        refined = _edge_center_improved(bw, x, y, bw_, bh, p, ref_angle_deg)
+        refined = _edge_center_improved(bw, x, y, bw_, bh, p, ref_angle_deg, debug_out=_dbg)
         if refined is None:
             # 非十字目标/拟合失败/后验可疑：失败（交给扩窗重试或手动补点），不再回退前景质心
             return None
@@ -745,13 +777,14 @@ def detect_cross_in_roi(roi_gray: np.ndarray, p: CrossDetectParams,
                     method = method + "+subpix"
             except cv2.error:
                 pass
+    _dbg.update({"method": method, "final": (float(cx), float(cy))})
     area = float(bw_.item() * bh.item()) if hasattr(bw_, "item") else float(bw_ * bh)
     # 方案D：置信度评分，低置信十字（弱十字/噪声交点）不再静默放行成 OK，
     # 显式标 DETECT_FAIL（保留坐标供查看/手动修正，ok=False 使下游统计排除）。
     conf = _confidence_score(roi_gray, bw, x, y, bw_, bh, cx, cy, polarity, p)
     if conf < p.conf_low:
-        return CrossResult(cx, cy, False, method, area, conf=conf, fail_reason="LOW_CONF")
-    return CrossResult(cx, cy, True, method, area, conf=conf)
+        return CrossResult(cx, cy, False, method, area, conf=conf, fail_reason="LOW_CONF", debug=_dbg)
+    return CrossResult(cx, cy, True, method, area, conf=conf, debug=_dbg)
 
 
 def detect_grid(gray: np.ndarray, rows: int, cols: int, pitch_px: float,
@@ -778,6 +811,7 @@ def detect_grid(gray: np.ndarray, rows: int, cols: int, pitch_px: float,
             if res is not None:
                 res.x += x0
                 res.y += y0
+                _shift_debug(getattr(res, "debug", None), x0, y0)
                 results.append(res)
             else:
                 results.append(None)
@@ -801,6 +835,27 @@ def detect_points(gray: np.ndarray, points: np.ndarray, pitch_px: float,
     return results
 
 
+def _shift_debug(dbg, dx: float, dy: float):
+    """把 ROI 局部坐标的识别过程几何平移到整图坐标。"""
+    if not isinstance(dbg, dict):
+        return
+    try:
+        roi = dbg.get("roi")
+        if roi is not None:
+            dbg["roi"] = (roi[0] + dx, roi[1] + dy, roi[2] + dx, roi[3] + dy)
+        for key in ("centroid", "mid", "mean_center", "final"):
+            v = dbg.get(key)
+            if v is not None:
+                dbg[key] = (float(v[0]) + dx, float(v[1]) + dy)
+        ap = dbg.get("arm_pixels")
+        if isinstance(ap, dict):
+            for k, arr in ap.items():
+                if arr is not None and len(arr):
+                    ap[k] = np.asarray(arr, np.float64) + np.array([dx, dy])
+    except Exception:
+        pass
+
+
 def _detect_one_point(gray: np.ndarray, px_: float, py_: float, win: int,
                       p: CrossDetectParams,
                       ref_angle_deg: Optional[float] = None) -> Optional[CrossResult]:
@@ -815,6 +870,7 @@ def _detect_one_point(gray: np.ndarray, px_: float, py_: float, win: int,
     if res is not None:
         res.x += x0
         res.y += y0
+        _shift_debug(getattr(res, "debug", None), x0, y0)
     return res
 
 

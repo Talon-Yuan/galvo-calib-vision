@@ -1052,6 +1052,22 @@ def _auto_detect_cross(gray: np.ndarray, direction: str,
         """点集 → 规整网格。返回 (rows, cols, step_px, grid)，坐标为 g 的坐标系。"""
         if points is None or len(points) < 4:
             return None
+        points = np.asarray(points, np.float64)
+        # v4.3.6：候选点最近邻间距一致性过滤。
+        # 黑纸上偶有边缘/划痕被误检成"十字"（如 0007 第 26 个点 nn=1080px vs 正常 404px），
+        # 一个离群点就会让规整网格聚类失败。先按最近邻间距中位数剔除明显离群点。
+        if len(points) >= 6:
+            try:
+                d2 = ((points[:, None, :] - points[None, :, :]) ** 2).sum(2)
+                np.fill_diagonal(d2, np.inf)
+                nn = np.sqrt(d2.min(axis=1))
+                med = float(np.median(nn))
+                if med > 0:
+                    keep = (nn > 0.5 * med) & (nn < 2.0 * med)
+                    if 4 <= int(keep.sum()) < len(points):
+                        points = points[keep]
+            except Exception:
+                pass
         n_pts = len(points)
         best = None
         for use_pca in (True, False):

@@ -489,17 +489,36 @@ class CenterProbeThread(QThread):
                 return
             gray = self.src.original_gray()
             p = self.params
-            # 1) 精测锚点：窗口三级放大
+            # 1) 精测锚点（v4.3.7）：优先"寻边中线交点"（edge_center），
+            #    质心法只在寻边失败时兜底，并记录 anchor_method 供日志/可视化核查。
             anchor = None
-            for frac in (0.25, 0.5, 0.75):
-                win = int(max(81, min(1200, pitch_px * frac)))
-                anchor = refine_manual_point(gray, self.hint_px[0], self.hint_px[1], p, win=win)
-                if anchor is not None:
-                    break
+            anchor_method = ""
+            anchor_conf = None
+            try:
+                r0 = detect_points(gray, np.array([[self.hint_px[0], self.hint_px[1]]], np.float64),
+                                   pitch_px, p)[0]
+                if r0 is not None and r0.ok:
+                    if math.hypot(float(r0.x) - self.hint_px[0],
+                                  float(r0.y) - self.hint_px[1]) <= 1.0 * pitch_px:
+                        anchor = (float(r0.x), float(r0.y))
+                        anchor_method = str(getattr(r0, "method", "edge_center") or "edge_center")
+                        anchor_conf = float(getattr(r0, "conf", 1.0) or 0.0)
+            except Exception:
+                anchor = None
+            if anchor is None:
+                # 兜底：质心精化（留痕，日志会标 centroid_fallback）
+                for frac in (0.25, 0.5, 0.75):
+                    win = int(max(81, min(1200, pitch_px * frac)))
+                    anchor = refine_manual_point(gray, self.hint_px[0], self.hint_px[1], p, win=win)
+                    if anchor is not None:
+                        anchor_method = "centroid_fallback"
+                        break
             if anchor is None:
                 res["message"] = "not_found"
                 self.done.emit(res)
                 return
+            res["anchor_method"] = anchor_method
+            res["anchor_conf"] = anchor_conf
             ax, ay = float(anchor[0]), float(anchor[1])
             # v4.2：远点保护①——精测锚点离点击处超过 1×间距，说明点击处本就没有十字
             if math.hypot(ax - self.hint_px[0], ay - self.hint_px[1]) > 1.0 * pitch_px:
@@ -1047,6 +1066,8 @@ class MainWindow(QMainWindow):
         act_load_proj = QAction(tr("main.load_project"), self); act_load_proj.triggered.connect(self._on_load_project)
         act_export = QAction(tr("main.export_excel"), self); act_export.triggered.connect(self._on_export)
         act_load_tpl = QAction(tr("main.load_template"), self); act_load_tpl.triggered.connect(self._on_load_template)
+        act_debug_export = QAction(tr("main.export_debug_process"), self)
+        act_debug_export.triggered.connect(self._on_export_debug_process)
         act_load_resfb = QAction(tr("main.load_residual_correction"), self)
         act_load_resfb.triggered.connect(self._on_load_residual_correction)
         act_load_resfb.setToolTip(tr("main.load_residual_correction_file_res_fb_npz_fitted_from"))
@@ -1076,7 +1097,7 @@ class MainWindow(QMainWindow):
         for a in (act_open, act_save_proj, act_load_proj, act_export):
             m_file.addAction(a)
         m_tools = mb.addMenu(tr("main.menu_tools"))
-        for a in (act_load_tpl, act_load_resfb, act_multi_pose):
+        for a in (act_load_tpl, act_load_resfb, act_multi_pose, act_debug_export):
             m_tools.addAction(a)
         m_tools.addSeparator()
         for a in (act_reg, act_load_reg, act_clear_reg):
@@ -1121,6 +1142,7 @@ class MainWindow(QMainWindow):
         self._menu_file, self._menu_tools, self._menu_help = m_file, m_tools, m_help
         self.act_export = act_export
         self.act_load_tpl = act_load_tpl
+        self.act_debug_export = act_debug_export
         self.act_load_resfb = act_load_resfb
         self.act_multi_pose = act_multi_pose
         self.act_reg = act_reg
@@ -2765,6 +2787,14 @@ class MainWindow(QMainWindow):
         self._log(tr("main.center_probe_ok", cx=float(center[0]), cy=float(center[1]),
                      ang=ang, n=int(payload.get("neighbors") or 0),
                      mp=("N/A" if mp is None else "%.3fmm" % float(mp))))
+        _am = payload.get("anchor_method") or ""
+        if _am:
+            self._log(tr("main.center_anchor_method", m=_am,
+                         cx=float(center[0]), cy=float(center[1]),
+                         conf=("N/A" if payload.get("anchor_conf") is None
+                               else "%.2f" % float(payload.get("anchor_conf")))))
+            if _am == "centroid_fallback":
+                self._log(tr("main.center_anchor_centroid_fallback_warn"))
         if payload.get("fallback_used"):
             self._log(tr("main.center_probe_neighbor_fallback"))
             self.statusBar().showMessage(tr("main.center_probe_neighbor_fallback"), 12000)
@@ -3316,6 +3346,17 @@ class MainWindow(QMainWindow):
         self._redraw_marks()
         n_ok = sum(1 for r in results if r is not None and r.ok)
         n_lowconf = sum(1 for r in results if r is not None and not r.ok)
+        try:
+            from collections import Counter as _C
+            _stats = _C([r.method for r in results if r is not None and r.ok])
+            _nfb = sum(1 for r in results
+                       if r is not None and isinstance(getattr(r, "debug", None), dict)
+                       and r.debug.get("fallback_mean"))
+            self._log(tr("main.detect_method_summary",
+                         stats=", ".join("%s=%d" % (k, v) for k, v in _stats.items()),
+                         n_fb=_nfb))
+        except Exception:
+            pass
         self._log(tr("main.zh_dfa3b41a",
                      ok=n_ok, total=len(results), fail=len(results) - n_ok))
         if len(results) > MAX_OVERLAY_ITEMS:
@@ -4166,6 +4207,42 @@ class MainWindow(QMainWindow):
         except Exception as e:
             QMessageBox.critical(self, tr("main.export_trace_image_full_2"),
                                  tr("main.export_failed_e", e=str(e)))
+
+    # ---------------- 识别过程可视化导出 ----------------
+    def _on_export_debug_process(self):
+        """导出彩色识别过程：红=寻边点，绿=四臂中线，蓝=交点，黄=质心；含 CSV/日志。"""
+        if self.src is None or not self.results:
+            QMessageBox.information(self, tr("main.export_debug_process"),
+                                    tr("main.load_a_scan_and_run_detection_first_export_needs_res"))
+            return
+        out_dir = qfd_dir(self, tr("main.export_debug_process"), "")
+        if not out_dir:
+            return
+        try:
+            from core.debug_render import export_debug_process
+            gray = self.src.original_gray()
+            labels = ["P%d" % (i + 1) for i in range(len(self.results))]
+            out = export_debug_process(gray, self.results, out_dir, labels=labels)
+            from collections import Counter
+            stats = Counter([r.method for r in self.results if r is not None and r.ok])
+            n_fb = sum(1 for r in self.results
+                       if r is not None and isinstance(getattr(r, "debug", None), dict)
+                       and r.debug.get("fallback_mean"))
+            log_lines = [tr("main.export_debug_process_log_head", n=out["n"], d=out_dir)]
+            for rec in out["rows"]:
+                log_lines.append("点%d %s: method=%s conf=%.2f 交点=(%.2f, %.2f)%s" % (
+                    rec["index"], rec["label"], rec["method"], rec["conf"],
+                    rec["x"], rec["y"], " [回退均值]" if rec["fallback_mean"] else ""))
+            log_lines.append(tr("main.detect_method_summary",
+                                stats=", ".join("%s=%d" % (k, v) for k, v in stats.items()),
+                                n_fb=n_fb))
+            for line in log_lines:
+                self._log(line)
+            QMessageBox.information(self, tr("main.export_debug_process"),
+                                    tr("main.export_debug_process_done", d=out_dir, n=out["n"]))
+        except Exception as e:  # noqa: BLE001
+            QMessageBox.critical(self, tr("main.export_debug_process"),
+                                 tr("main.export_debug_process_failed", e=str(e)))
 
     # ---------------- 表格与导出 ----------------
     def _row_values(self, i: int, r, nominal, center) -> list:
