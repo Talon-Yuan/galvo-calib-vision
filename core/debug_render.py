@@ -63,7 +63,7 @@ def render_result_debug(gray: np.ndarray, r, index: int, out_path: str,
         cv2.imwrite(out_path, np.zeros((32, 32, 3), np.uint8)) if False else None
         return rec
     crop = _bgr(gray[y0:y1, x0:x1])
-    scale = max(1.0, min(4.0, 720.0 / max(1, max(crop.shape[:2]))))
+    scale = min(4.0, 720.0 / max(1, max(crop.shape[:2])))
     if scale != 1.0:
         crop = cv2.resize(crop, None, fx=scale, fy=scale, interpolation=cv2.INTER_NEAREST)
     m = (x0, y0)  # 全局 -> 图内 偏移
@@ -72,7 +72,7 @@ def render_result_debug(gray: np.ndarray, r, index: int, out_path: str,
         return (int(round((x - m[0]) * scale)), int(round((y - m[1]) * scale)))
 
     if isinstance(dbg, dict):
-        ap = dbg.get("arm_pixels") or {}
+        ap = dbg.get("edge_points") or dbg.get("arm_pixels") or {}
         total = 0
         for k, arr in ap.items():
             if arr is None or len(arr) == 0:
@@ -98,10 +98,39 @@ def render_result_debug(gray: np.ndarray, r, index: int, out_path: str,
                     pts.append(to_img(gx0 + a * v + b, gy0 + v))
                 cv2.line(crop, pts[0], pts[1], (0, 200, 0), 1, cv2.LINE_AA)
             try:
-                if fits.get("l") is not None: line_h(*fits["l"])
-                if fits.get("r") is not None: line_h(*fits["r"])
-                if fits.get("t") is not None: line_v(*fits["t"])
-                if fits.get("b") is not None: line_v(*fits["b"])
+                def _dash(p1, p2, color, dash=18, gap=12):
+                    x1, y1 = p1; x2, y2 = p2
+                    L = float(np.hypot(x2 - x1, y2 - y1))
+                    if L < 1: return
+                    n = int(L // (dash + gap)) + 1
+                    for k in range(n):
+                        t0 = (k * (dash + gap)) / L; t1 = min(1.0, (k * (dash + gap) + dash) / L)
+                        cv2.line(crop, (int(x1 + (x2 - x1) * t0), int(y1 + (y2 - y1) * t0)),
+                                 (int(x1 + (x2 - x1) * t1), int(y1 + (y2 - y1) * t1)), color, 1, cv2.LINE_AA)
+                # 绿实线 = 四条边缘线（贴着十字边缘）；绿虚线 = 两条中线（边缘成对平均）
+                if fits.get("edge_top") is not None:
+                    a, b = fits["edge_top"]
+                    cv2.line(crop, to_img(gx0, gy0 + a * 0 + b), to_img(gx0 + ww, gy0 + a * ww + b), (0, 220, 0), 1, cv2.LINE_AA)
+                if fits.get("edge_bottom") is not None:
+                    a, b = fits["edge_bottom"]
+                    cv2.line(crop, to_img(gx0, gy0 + a * 0 + b), to_img(gx0 + ww, gy0 + a * ww + b), (0, 220, 0), 1, cv2.LINE_AA)
+                if fits.get("edge_left") is not None:
+                    a, b = fits["edge_left"]
+                    cv2.line(crop, to_img(gx0 + a * 0 + b, gy0), to_img(gx0 + a * hh + b, gy0 + hh), (0, 220, 0), 1, cv2.LINE_AA)
+                if fits.get("edge_right") is not None:
+                    a, b = fits["edge_right"]
+                    cv2.line(crop, to_img(gx0 + a * 0 + b, gy0), to_img(gx0 + a * hh + b, gy0 + hh), (0, 220, 0), 1, cv2.LINE_AA)
+                if fits.get("h") is not None:
+                    a, b = fits["h"]
+                    _dash(to_img(gx0, gy0 + b), to_img(gx0 + ww, gy0 + a * ww + b), (0, 255, 0), dash=14, gap=10)
+                if fits.get("v") is not None:
+                    a, b = fits["v"]
+                    _dash(to_img(gx0 + b, gy0), to_img(gx0 + a * hh + b, gy0 + hh), (0, 255, 0), dash=14, gap=10)
+                if fits.get("h") is None and fits.get("v") is None:
+                    if fits.get("l") is not None: line_h(*fits["l"])
+                    if fits.get("r") is not None: line_h(*fits["r"])
+                    if fits.get("t") is not None: line_v(*fits["t"])
+                    if fits.get("b") is not None: line_v(*fits["b"])
             except Exception:
                 pass
         # 质心（黄）与交点（蓝）

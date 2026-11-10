@@ -280,9 +280,18 @@ class DetectorThread(QThread):
                             got = detect_cross_in_roi(gray[y0:y1, x0:x1], self.params,
                                                       ref_angle_deg=self.ref_angle_deg)
                             if got is not None and getattr(got, "ok", False):
+                                _inner = str(getattr(got, "method", "") or "")
+                                _m = "local_retry" if not _inner else ("local_retry:" + _inner)
+                                _dbg2 = getattr(got, "debug", None)
+                                try:
+                                    from core.cross_detector import _shift_debug
+                                    _shift_debug(_dbg2, x0, y0)
+                                except Exception:
+                                    pass
                                 got = CrossResult(float(x0 + got.x), float(y0 + got.y), True,
-                                                  method="local_retry", refined=True,
-                                                  conf=float(getattr(got, "conf", 0.9)))
+                                                  method=_m, refined=True,
+                                                  conf=float(getattr(got, "conf", 0.9)),
+                                                  debug=_dbg2)
                             else:
                                 got = None
                     except Exception:
@@ -495,8 +504,14 @@ class CenterProbeThread(QThread):
             anchor_method = ""
             anchor_conf = None
             try:
+                # 中心锚点强制 edge_center（严格中线交点）；不受界面"投影质心"选项影响
+                try:
+                    from dataclasses import replace as _dc_replace
+                    _p_anchor = _dc_replace(p, method="edge_center")
+                except Exception:
+                    _p_anchor = p
                 r0 = detect_points(gray, np.array([[self.hint_px[0], self.hint_px[1]]], np.float64),
-                                   pitch_px, p)[0]
+                                   pitch_px, _p_anchor)[0]
                 if r0 is not None and r0.ok:
                     if math.hypot(float(r0.x) - self.hint_px[0],
                                   float(r0.y) - self.hint_px[1]) <= 1.0 * pitch_px:
@@ -3350,8 +3365,7 @@ class MainWindow(QMainWindow):
             from collections import Counter as _C
             _stats = _C([r.method for r in results if r is not None and r.ok])
             _nfb = sum(1 for r in results
-                       if r is not None and isinstance(getattr(r, "debug", None), dict)
-                       and r.debug.get("fallback_mean"))
+                       if r is not None and "centroid_fallback" in str(getattr(r, "method", "")))
             self._log(tr("main.detect_method_summary",
                          stats=", ".join("%s=%d" % (k, v) for k, v in _stats.items()),
                          n_fb=_nfb))

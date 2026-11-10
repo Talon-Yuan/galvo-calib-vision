@@ -466,123 +466,153 @@ def _edge_center_improved(bw: np.ndarray, x: int, y: int, bw_: int, bh: int,
                           p: CrossDetectParams,
                           ref_angle_deg: Optional[float] = None,
                           debug_out: Optional[dict] = None) -> Optional[Tuple[float, float]]:
-    """寻边中线交点法（改进版，2026-09-23 方案）：
-    A. 十字形校验（臂数=4、正交、臂长比、方向约束）→ 过滤 X/Y 文字等非十字目标；
-    B. 四臂稳健直线拟合替代像素均值（抗噪点/毛刺）；
-    C. 方向约束剔除与主轴偏差>tol 的像素；
-    D. 后验校验：中心与质心偏差 > 线宽×2 判定可疑返回失败（交给手动/扩窗）。
-    返回 (mid_x, mid_y) 或 None（非十字目标/拟合失败/可疑）。
-    ref_angle_deg: 网格参考方向（纸面X轴图像角°），None=图像轴（旧行为）。"""
+    """寻边→中线→交点（v4.3.8 真寻边版）。
+
+    A. 十字形校验过滤非十字目标；
+    B. 水平臂：逐列在左右臂区段找前景的【上/下边缘】，取成对边缘中点得中线样本；
+       竖直臂：逐行在上下臂区段找【左/右边缘】，取中点；
+    C. 对中线样本稳健直线拟合 → 两条中线；求交点。
+    D. 后验：交点离质心 > 线宽×2 判可疑。
+    这样只用"臂的边缘"，不受中心 X/Y 标注、内部毛刺干扰。
+    debug_out: 输出 edge_points（红）、中点样本、中线拟合（绿）、交点（蓝）。
+    """
     sub = bw[y:y + bh, x:x + bw_].astype(np.uint8)
     ys, xs = np.nonzero(sub > 0)
     if xs.size == 0:
         return None
     cx0 = x + float(xs.mean())
     cy0 = y + float(ys.mean())
-    # A. 十字形校验
     if p.cross_check:
         if not _cross_shape_validate(sub, cx0 - x, cy0 - y, p, ref_angle_deg):
             return None
-    dx = xs.astype(np.float64) + x - cx0
-    dy = ys.astype(np.float64) + y - cy0
-    dx, dy = _rotate_to_ref(dx, dy, ref_angle_deg)
     geo = _cross_geometry(sub, cx0 - x, cy0 - y)
     line_w = geo[0] if geo is not None else max(1.0, min(bw_, bh) * 0.08)
-    lw_half = line_w * 0.5
-    # C. 方向约束（线宽自适应）：水平臂允许 |dy| ≤ 线宽半宽 + tan(tol)*|dx|，
-    #    垂直臂同理。既剔除与主轴明显偏斜的噪点，又不会把粗臂像素过度裁剪
-    #    （避免小臂长/粗线宽场景下仅剩中心窄带、X/Y 文字占比被放大）。
+    guard = max(2.0, line_w * 1.2)          # 避开中心块
+    max_thick = max(3.0, line_w * 3.0)       # 臂带厚度上限
+
+    # ---- 水平臂：逐列找上下边缘（剔除中心块、箭头/加粗畸变、两端箭头区）----
+    raw_h = []   # (x, top, bot)
+    for xv in range(int(guard), int(bw_ - guard)):
+        gx = x + xv
+        if abs(gx - cx0) < guard:
+            continue
+        col = np.nonzero(sub[:, xv])[0]
+        if col.size < 2:
+            continue
+        top = y + int(col.min()); bot = y + int(col.max())
+        raw_h.append((float(gx), float(top), float(bot)))
+    raw_v = []
+    for yv in range(int(guard), int(bh - guard)):
+        gy = y + yv
+        if abs(gy - cy0) < guard:
+            continue
+        row = np.nonzero(sub[yv, :])[0]
+        if row.size < 2:
+            continue
+        raw_v.append((float(gy), float(x + int(row.min())), float(x + int(row.max()))))
+
+    def _clean_band(raw, is_h, line_w):
+        """按厚度中位数剔箭头/畸变，并去掉两端各 10%（箭头标注区）。"""
+        if len(raw) < 6:
+            return None
+        th = np.array([r[2] - r[1] for r in raw], float)
+        med = float(np.median(th))
+        keep = np.abs(th - med) <= max(2.0, 0.55 * med)
+        raw2 = [r for r, k in zip(raw, keep) if k]
+        if len(raw2) < 6:
+            return None
+        t = np.array([r[0] for r in raw2], float)
+        lo, hi = float(np.min(t)), float(np.max(t))
+        L = hi - lo
+        m = (t >= lo + 0.10 * L) & (t <= hi - 0.10 * L)
+        raw2 = [r for r, k in zip(raw2, m) if k]
+        return raw2 or None
+
+    raw_h = _clean_band(raw_h, True, line_w)
+    raw_v = _clean_band(raw_v, False, line_w)
+    if raw_h is None or raw_v is None:
+        return None
+    hx = np.array([r[0] for r in raw_h], float)
+    hy = np.array([0.5 * (r[1] + r[2]) for r in raw_h], float)
+    top_edge = [(r[0], r[1]) for r in raw_h]
+    bot_edge = [(r[0], r[2]) for r in raw_h]
+    vy = np.array([r[0] for r in raw_v], float)
+    vx = np.array([0.5 * (r[1] + r[2]) for r in raw_v], float)
+    left_edge = [(r[1], r[0]) for r in raw_v]
+    right_edge = [(r[2], r[0]) for r in raw_v]
+
+    def _robust_refit(xs, ys, tol_px):
+        """拟合→剔除残差>tol→重拟合（最少保留 6 点）。"""
+        if len(xs) < 6:
+            return None
+        a, b = _robust_line_fit(xs, ys)
+        r = np.abs(ys - (a * xs + b))
+        keep = r <= tol_px
+        if keep.sum() >= 6:
+            a, b = _robust_line_fit(xs[keep], ys[keep])
+        return a, b
+
+    tol_fit = max(2.0, 0.6 * line_w)
+    tx = np.array([p[0] for p in top_edge], float); ty = np.array([p[1] for p in top_edge], float)
+    bx = np.array([p[0] for p in bot_edge], float); by = np.array([p[1] for p in bot_edge], float)
+    ly = np.array([p[1] for p in left_edge], float); lx = np.array([p[0] for p in left_edge], float)
+    ry = np.array([p[1] for p in right_edge], float); rx = np.array([p[0] for p in right_edge], float)
+    fit_top = _robust_refit(tx, ty, tol_fit)     # y = a*x+b
+    fit_bot = _robust_refit(bx, by, tol_fit)
+    fit_left = _robust_refit(ly, lx, tol_fit)    # x = a*y+b
+    fit_right = _robust_refit(ry, rx, tol_fit)
+    if not all(f is not None for f in (fit_top, fit_bot, fit_left, fit_right)):
+        return None
+    # 中线 = 成对边缘线的平均（箭头/缺口区靠边缘线延伸穿过中心）
+    a_h = 0.5 * (fit_top[0] + fit_bot[0]); b_h = 0.5 * (fit_top[1] + fit_bot[1])
+    a_v = 0.5 * (fit_left[0] + fit_right[0]); b_v = 0.5 * (fit_left[1] + fit_right[1])
+    fit_h = (a_h, b_h); fit_v = (a_v, b_v)
+    if fit_h is None or fit_v is None:
+        return None
+    a_h, b_h = fit_h
+    a_v, b_v = fit_v
     tol = math.tan(math.radians(p.arm_angle_tol_deg))
-    horiz = (np.abs(dx) > 0) & (np.abs(dy) <= lw_half + tol * np.abs(dx))
-    vert = (np.abs(dy) > 0) & (np.abs(dx) <= lw_half + tol * np.abs(dy))
-    if horiz.sum() == 0 or vert.sum() == 0:
-        return None
-    left = horiz & (dx < 0)
-    right = horiz & (dx >= 0)
-    top = vert & (dy < 0)
-    bottom = vert & (dy >= 0)
-    if left.sum() < 5 or right.sum() < 5 or top.sum() < 5 or bottom.sum() < 5:
-        return None
-    xsg = (xs + x).astype(np.float64)
-    ysg = (ys + y).astype(np.float64)
-    # B. 四臂稳健直线拟合（替代像素均值）
-    fit_l = _robust_line_fit(xsg[left], ysg[left])    # 左臂 y = aL*x+bL
-    fit_r = _robust_line_fit(xsg[right], ysg[right])  # 右臂 y = aR*x+bR
-    fit_t = _robust_line_fit(ysg[top], xsg[top])      # 上臂 x = aT*y+bT
-    fit_b = _robust_line_fit(ysg[bottom], xsg[bottom])  # 下臂 x = aB*y+bB
-    slope_ok = False
-    if fit_l is not None and fit_r is not None and fit_t is not None and fit_b is not None:
-        a_l, b_l = fit_l
-        a_r, b_r = fit_r
-        a_t, b_t = fit_t
-        a_b, b_b = fit_b
-        # 拟合斜率须在十字允许倾斜范围内（|a|≤tan(tol)）；超限说明拟合被
-        # X/Y 文字/邻域结构污染（斜率呈伪相关），回退像素均值法。
-        slope_ok = (abs(a_l) <= tol and abs(a_r) <= tol
-                    and abs(a_t) <= tol and abs(a_b) <= tol)
-        if slope_ok:
-            # 在质心处取值：横中线 y=(yL(cx0)+yR(cx0))/2，竖中线 x=(xT(cy0)+xB(cy0))/2
-            mid_x = (a_t * cy0 + b_t + a_b * cy0 + b_b) / 2.0
-            mid_y = (a_l * cx0 + b_l + a_r * cx0 + b_r) / 2.0
-            # 拟合与均值一致性校验：两者中心差超阈值说明拟合被局部结构污染，
-            # 回退均值法（实测在中心十字/文字干扰场景更稳）。
-            horiz_o = np.abs(dx) >= np.abs(dy)
-            vert_o = ~horiz_o
-            left_o = horiz_o & (dx < 0)
-            right_o = horiz_o & (dx >= 0)
-            top_o = vert_o & (dy < 0)
-            bottom_o = vert_o & (dy >= 0)
-            if left_o.sum() > 0 and right_o.sum() > 0 and top_o.sum() > 0 and bottom_o.sum() > 0:
-                m_y = (float(ysg[left_o].mean()) + float(ysg[right_o].mean())) / 2.0
-                m_x = (float(xsg[top_o].mean()) + float(xsg[bottom_o].mean())) / 2.0
-                # v4.3.7 严格化：四臂中线交点【唯一】采用；均值只做诊断，绝不因均值偏差
-                # 把交点换成均值（那正是"均值冒充交点"来源，P1/P13/P14/P25 曾因此偏移）。
-                if debug_out is not None:
-                    debug_out["fit_vs_mean_px"] = float(math.hypot(mid_x - m_x, mid_y - m_y))
-    if not slope_ok:
-        # v4.3.7 严格化：四臂中线拟合失败时，不再用"四臂像素均值"冒充交点
-        # （均值不是交点，会把中心带偏却仍报 edge_center）。
-        # 返回 None，由 detect_cross_in_roi 走质心兜底并显式标 centroid_fallback。
+    if abs(a_h) > tol or abs(a_v) > tol:
         if debug_out is not None:
-            debug_out.update({
-                "fit_failed": True, "fit_used": False,
-                "bbox": (int(x), int(y), int(bw_), int(bh)),
-                "centroid": (float(cx0), float(cy0)),
-                "line_w": float(line_w),
-                "fits": {"l": fit_l, "r": fit_r, "t": fit_t, "b": fit_b},
-            })
+            debug_out.update({"fit_used": False, "fit_failed": True,
+                              "fits": {"h": fit_h, "v": fit_v}})
         return None
-    # 识别过程几何（可视化/日志用）：四臂像素、四臂中线、交点、质心、是否回退均值
-    if debug_out is not None:
-        def _sub(arr):
-            arr = np.asarray(arr, np.float64).reshape(-1, 2)
-            if len(arr) > 400:
-                arr = arr[::max(1, len(arr) // 400)]
-            return arr
-        try:
-            debug_out.update({
-                "arm_pixels": {
-                    "left": _sub(np.stack([xsg[left], ysg[left]], 1)),
-                    "right": _sub(np.stack([xsg[right], ysg[right]], 1)),
-                    "top": _sub(np.stack([xsg[top], ysg[top]], 1)),
-                    "bottom": _sub(np.stack([xsg[bottom], ysg[bottom]], 1)),
-                },
-                "bbox": (int(x), int(y), int(bw_), int(bh)),
-                "centroid": (float(cx0), float(cy0)),
-                "mid": (float(mid_x), float(mid_y)),
-                "mean_center": (float(locals().get("m_x", mid_x)), float(locals().get("m_y", mid_y))),
-                "fit_used": bool(slope_ok),
-                "fallback_mean": bool(not slope_ok),
-                "line_w": float(line_w),
-                "fits": {"l": fit_l, "r": fit_r, "t": fit_t, "b": fit_b},
-            })
-        except Exception:
-            pass
-    # D. 后验校验：中心与质心偏差 > 线宽×2 → 可疑（可能选中非十字目标/严重噪点）
+    # 交点：y=a_h*x+b_h 与 x=a_v*y+b_v
+    den = 1.0 - a_v * a_h
+    if abs(den) < 1e-9:
+        return None
+    mid_x = (a_v * b_h + b_v) / den
+    mid_y = a_h * mid_x + b_h
+    # 后验：交点离质心太远 → 可疑
     if abs(mid_x - cx0) > line_w * 2.0 or abs(mid_y - cy0) > line_w * 2.0:
         if debug_out is not None:
             debug_out["suspicious"] = True
         return None
+    if debug_out is not None:
+        def _sub(a):
+            a = np.asarray(a, np.float64).reshape(-1, 2)
+            return a[::max(1, len(a) // 300)] if len(a) > 300 else a
+        debug_out.update({
+            "arm_pixels": {},  # 兼容旧字段
+            "edge_points": {
+                "top": _sub(top_edge), "bottom": _sub(bot_edge),
+                "left": _sub(left_edge), "right": _sub(right_edge),
+            },
+            "edge_center_samples": {"h": _sub(np.stack([hx, hy], 1)), "v": _sub(np.stack([vx, vy], 1))},
+            "bbox": (int(x), int(y), int(bw_), int(bh)),
+            "centroid": (float(cx0), float(cy0)),
+            "mid": (float(mid_x), float(mid_y)),
+            "mean_center": (float(mid_x), float(mid_y)),
+            "fit_used": True, "fallback_mean": False,
+            "line_w": float(line_w),
+            "fits": {
+                "h": (float(a_h), float(b_h)), "v": (float(a_v), float(b_v)),
+                "edge_top": (float(fit_top[0]), float(fit_top[1])),
+                "edge_bottom": (float(fit_bot[0]), float(fit_bot[1])),
+                "edge_left": (float(fit_left[0]), float(fit_left[1])),
+                "edge_right": (float(fit_right[0]), float(fit_right[1])),
+            },
+        })
     return mid_x, mid_y
 
 
