@@ -40,7 +40,8 @@ def render_result_debug(gray: np.ndarray, r, index: int, out_path: str,
         "conf": (float(getattr(r, "conf", 0.0)) if r is not None else 0.0),
         "x": (float(r.x) if r is not None else float("nan")),
         "y": (float(r.y) if r is not None else float("nan")),
-        "fallback_mean": bool(dbg.get("fallback_mean")) if isinstance(dbg, dict) else False,
+        "fallback_mean": (bool(dbg.get("fallback_mean")) if isinstance(dbg, dict) else False)
+                          or ("centroid_fallback" in str(getattr(r, "method", ""))),
         "fit_used": bool(dbg.get("fit_used")) if isinstance(dbg, dict) else False,
         "centroid_dx": float("nan"), "centroid_dy": float("nan"),
         "fit_vs_mean_px": float("nan"), "n_arm": 0, "note": note,
@@ -72,7 +73,7 @@ def render_result_debug(gray: np.ndarray, r, index: int, out_path: str,
         return (int(round((x - m[0]) * scale)), int(round((y - m[1]) * scale)))
 
     if isinstance(dbg, dict):
-        _fallback = bool(dbg.get("fallback_center"))
+        _fallback = bool(dbg.get("fallback_center")) or ("centroid_fallback" in str(rec.get("method", "")))
         ap = {} if _fallback else (dbg.get("edge_points") or dbg.get("arm_pixels") or {})
         total = 0
         for k, arr in ap.items():
@@ -100,7 +101,7 @@ def render_result_debug(gray: np.ndarray, r, index: int, out_path: str,
                 cv2.line(crop, pts[0], pts[1], (0, 200, 0), 1, cv2.LINE_AA)
             try:
                 if _fallback:
-                    raise RuntimeError("fallback")
+                    raise StopIteration
                 def _dash(p1, p2, color, dash=18, gap=12):
                     x1, y1 = p1; x2, y2 = p2
                     L = float(np.hypot(x2 - x1, y2 - y1))
@@ -134,6 +135,8 @@ def render_result_debug(gray: np.ndarray, r, index: int, out_path: str,
                     if fits.get("r") is not None: line_h(*fits["r"])
                     if fits.get("t") is not None: line_v(*fits["t"])
                     if fits.get("b") is not None: line_v(*fits["b"])
+            except StopIteration:
+                pass
             except Exception:
                 pass
         # 质心（黄）与交点（蓝）

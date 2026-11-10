@@ -3,7 +3,7 @@
   "files": {
     "core/calibrator.py": {
       "sha256": "705134a57f43ae9541e6ee7ba1e22eced5971dba4d02b15f477808e1998e78b8",
-      "reason": "v4.3.9 authorized: edge_points shift + render fix"
+      "reason": "v4.3.10 authorized: P2 cleanup"
     },
     "core/image_loader.py": {
       "sha256": "1f4aa7b21ae0d50961366c86001fda9c96ebce1b8456467c88a649e48c84a13b",
@@ -30,12 +30,12 @@
       "reason": "v4.3.1 authorized: default numbering changed to bottom-left row-major (14 requirement)"
     },
     "core/cross_detector.py": {
-      "sha256": "10640a325869f074699cce9dfb54aaaa491a82a1adfcc0843b03ddece7c50dae",
-      "reason": "v4.3.9 authorized: edge_points shift + render fix"
+      "sha256": "b754645619250673fe540fb801a84454155ea46111065dfee180b719f800c88c",
+      "reason": "v4.3.10 authorized: P2 cleanup"
     },
     "core/debug_render.py": {
-      "sha256": "3640279fd5d092fc2ac5bc6ab5eb31682d87a61c0d33d0f7d3f2ff45adec44b9",
-      "reason": "v4.3.9 authorized: edge_points shift + render fix"
+      "sha256": "e98c19fb31d2cd1756672630a459dba0c3b4cf10061a47c21c3e705a8118838c",
+      "reason": "v4.3.10 authorized: P2 cleanup"
     }
   }
 }

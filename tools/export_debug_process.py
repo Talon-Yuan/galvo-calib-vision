@@ -71,7 +71,7 @@ def main() -> int:
             ("%.2f" % rec["centroid_dx"]) if np.isfinite(rec["centroid_dx"]) else "N/A",
             ("%.2f" % rec["centroid_dy"]) if np.isfinite(rec["centroid_dy"]) else "N/A",
             rec["fit_vs_mean_px"] if np.isfinite(rec["fit_vs_mean_px"]) else float("nan"),
-            rec["n_arm"], (" [回退均值]" if rec["fallback_mean"] else "")))
+            rec.get("n_edge", rec.get("n_arm", 0)), (" [质心兜底]" if "centroid_fallback" in str(rec["method"]) else "")))
     n_method = {}
     for rec in out["rows"]:
         n_method[rec["method"]] = n_method.get(rec["method"], 0) + 1

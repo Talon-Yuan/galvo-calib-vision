@@ -754,6 +754,13 @@ def detect_cross_in_roi(roi_gray: np.ndarray, p: CrossDetectParams,
             # v4.3.7 严格兜底：四臂中线拟合不出交点 → 允许"质心兜底"，
             # 但必须显式标记 centroid_fallback（日志/CSV/表格可见），绝不冒称 edge_center。
             try:
+                try:
+                    _bb = (int(x), int(y), int(bw_), int(bh))
+                    _ys2, _xs2 = np.nonzero(sub if 'sub' in locals() else bw[y:y + bh, x:x + bw_])
+                    _dbg.setdefault("bbox", _bb)
+                    _dbg.setdefault("centroid", (float(x + _xs2.mean()), float(y + _ys2.mean())))
+                except Exception:
+                    pass
                 cx, cy, _sym_deg = _projection_center_sym(roi_gray, bw, x, y, bw_, bh, polarity, p)
                 method = "centroid_fallback"
                 _dbg.update({"method": method, "fit_used": False,
