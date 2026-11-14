@@ -1183,8 +1183,8 @@ def _diagnose_failure(gray: np.ndarray, max_rows: int, max_cols: int) -> str:
 def auto_detect_chessboard(gray: np.ndarray, square_mm: Optional[float] = None,
                            dpi: Optional[float] = None, progress_cb=None,
                            direction: str = "auto", pattern: str = "auto",
-                           min_rows: int = 2, max_rows: int = 60,
-                           min_cols: int = 2, max_cols: int = 80,
+                           min_rows: int = 2, max_rows: int = 400,
+                           min_cols: int = 2, max_cols: int = 400,
                            pixel_scale: float = 1.0) -> AutoChessDetectResult:
     """自动识别标定板行列数与关键参数（无需预知行/列）。
 

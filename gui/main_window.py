@@ -1209,8 +1209,8 @@ class MainWindow(QMainWindow):
         self.cb_spec.blockSignals(False)
         self.cb_spec.setCurrentIndex(1)  # 默认 5×5，与行列默认值一致
         self.cb_spec.currentTextChanged.connect(self._on_spec_changed)
-        self.sp_rows = QSpinBox(); self.sp_rows.setRange(1, 99); self.sp_rows.setValue(5)
-        self.sp_cols = QSpinBox(); self.sp_cols.setRange(1, 99); self.sp_cols.setValue(5)
+        self.sp_rows = QSpinBox(); self.sp_rows.setRange(1, 400); self.sp_rows.setValue(5)
+        self.sp_cols = QSpinBox(); self.sp_cols.setRange(1, 400); self.sp_cols.setValue(5)
         self.sp_pitch = QDoubleSpinBox(); self.sp_pitch.setRange(0.1, 500.0)
         self.sp_pitch.setValue(20.0); self.sp_pitch.setDecimals(2); self.sp_pitch.setSuffix(" mm")
         self.sp_dpi = QDoubleSpinBox(); self.sp_dpi.setRange(72, 9600)
