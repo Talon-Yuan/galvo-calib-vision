@@ -2288,6 +2288,7 @@ class MainWindow(QMainWindow):
             self._apply_project_state(pending, pending.get("_proj_path", ""))
         # B1 摆正：图片就绪后自动估角（后台线程），角度只进换算层旋转矩阵
         self._deskew_ang = None
+        self._deskew_from_grid = False
         self._deskew_shape = (src.origin_h, src.origin_w)
         self._deskew_loader = DeskewAngleThread(src, parent=self)
         self._deskew_loader.done.connect(self._on_deskew_angle)
@@ -2296,6 +2297,10 @@ class MainWindow(QMainWindow):
     def _on_deskew_angle(self, obj):
         """B1 估角回调：写回摆正角，log 栏输出角度；失败/未检出则跳过摆正。"""
         if self.sender() is not getattr(self, "_deskew_loader", None):
+            return
+        # v4.3.14：建系后以网格实测轴角为准，忽略后台迟到/错误的估角，
+        # 避免坐标在检测/导出中途被旋转（实测估角 -0.5° vs 网格 0.0°）。
+        if getattr(self, "_deskew_from_grid", False):
             return
         if isinstance(obj, Exception):
             self._deskew_ang = None
@@ -2695,6 +2700,19 @@ class MainWindow(QMainWindow):
         g.origin_kind = origin_kind if origin_kind in ("center", "corner") else "center"
         return g
 
+    def _sync_deskew_from_grid(self):
+        """用网格实测 X 轴角做摆正角（替代预览估角），保证坐标与阵列轴一致。"""
+        try:
+            if self.grid is None:
+                return
+            gx = self.grid.x_dir_px
+            self._deskew_ang = float(math.degrees(math.atan2(float(gx[1]), float(gx[0]))))
+            self._deskew_from_grid = True
+            self._log(tr("main.deskew_angle_ang_3f_written_into_mapping_rotation_ma",
+                         ang=self._deskew_ang))
+        except Exception:
+            pass
+
     def _grid_center_px(self, g=None):
         """阵列几何中心像素（按设计 pitch/方向推算，不用检测结果）。"""
         g = self.grid if g is None else g
@@ -2738,6 +2756,7 @@ class MainWindow(QMainWindow):
         self.grid = g
         self._apply_ortho(g, tr("main.grid_built_from_params"))
         self._manual_grid_snapshot = g
+        self._sync_deskew_from_grid()
         return g
 
     def _start_center_probe(self, mode: str, second_px=None):
@@ -3066,6 +3085,7 @@ class MainWindow(QMainWindow):
             pass
         # 自动建系在 AutoFrameThread 内已解码原始灰度，视为已预热
         self._gray_warm = True
+        self._sync_deskew_from_grid()
         # 刷新预览标记（与 _finish_pick 一致）
         pts = self.grid.points_px()
         s = self.src.scale
