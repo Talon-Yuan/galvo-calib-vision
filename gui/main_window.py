@@ -2713,6 +2713,40 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
 
+    def _sync_deskew_from_results(self):
+        """检测后：用实测点阵相对设计轴系的旋转角做摆正，修正自动建系轴被吸正导致的残余歪斜。"""
+        try:
+            if self.grid is None or not self.results:
+                return
+            cols = int(self.grid.cols)
+            ppx = float(self.grid.pitch_mm) * float(self.grid.dpi) / 25.4
+            A, B = [], []
+            for i, r in enumerate(self.results):
+                if r is None or not getattr(r, "ok", False):
+                    continue
+                row, col = divmod(i, cols)
+                A.append((col * ppx, row * ppx))     # 设计轴系
+                B.append((float(r.x), float(r.y)))   # 实测像素
+            if len(A) < 6:
+                return
+            A = np.asarray(A, np.float64); B = np.asarray(B, np.float64)
+            ca, cb = A.mean(0), B.mean(0)
+            H = (A - ca).T @ (B - cb)
+            U, S, Vt = np.linalg.svd(H)
+            R = Vt.T @ U.T
+            if np.linalg.det(R) < 0:
+                Vt[-1, :] *= -1
+                R = Vt.T @ U.T
+            ang = float(math.degrees(math.atan2(R[1, 0], R[0, 0])))
+            if abs(ang) > 10.0:
+                return
+            self._deskew_ang = ang
+            self._deskew_from_grid = True
+            self._log(tr("main.deskew_angle_ang_3f_written_into_mapping_rotation_ma",
+                         ang=self._deskew_ang))
+        except Exception:
+            pass
+
     def _grid_center_px(self, g=None):
         """阵列几何中心像素（按设计 pitch/方向推算，不用检测结果）。"""
         g = self.grid if g is None else g
@@ -3367,6 +3401,8 @@ class MainWindow(QMainWindow):
                     results = new_res
                     rematch_note = tr("main.detected_point_index_shuffling_rematched_n_points_to",
                                       n=n_rematch)
+        # 方向：用实测点阵相对设计轴的真实旋转角做摆正（修自动建系轴被吸到 0/90）
+        self._sync_deskew_from_results()
         self.btn_detect.setEnabled(self.calibrated)
         self.btn_manual.setEnabled(True)
         self.progress.setValue(100)

@@ -732,6 +732,18 @@ class CalibrationWidget(QWidget):
         self.sp_rows.blockSignals(True); self.sp_rows.setValue(res.rows); self.sp_rows.blockSignals(False)
         self.sp_cols.blockSignals(True); self.sp_cols.setValue(res.cols); self.sp_cols.blockSignals(False)
         self._update_precision()
+        # 高密度板：必须确认单格实际尺寸；沿用默认 10mm 会让坐标整体放大（实测踩过 3.33 倍）
+        try:
+            if int(res.rows) * int(res.cols) >= 2000 and abs(float(self.sp_square.value()) - 10.0) < 1e-6:
+                msg = ("检测到高密度棋盘格 %d×%d：请把“单格(mm)”改成实测值（示例板为 3.0mm）。\n"
+                       "沿用默认 10mm 会使坐标整体放大 3.33 倍，结果会全部 NG。\n\n"
+                       "Dense board %d×%d detected: set the measured square size (e.g. 3.0 mm).\n"
+                       "Keeping 10 mm scales every coordinate by 3.33x and makes all results NG.") % (
+                           int(res.rows), int(res.cols), int(res.rows), int(res.cols))
+                QMessageBox.information(self, "单格尺寸确认 / Confirm square size", msg)
+                self.message.emit(msg.splitlines()[0])
+        except Exception:
+            pass
         # 推荐膨胀系数（不自动覆盖用户设定，仅提示并支持一键应用）
         rec = res.dilation_rec
         if abs(rec - 1.0) < 1e-4:
